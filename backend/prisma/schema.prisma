@@ -1,0 +1,250 @@
+// Pilot Program Manager — data model
+// Run `npm run prisma:migrate` (or db push) to create/update the database.
+//
+// Hierarchy:
+//   Application (one per PM)
+//     ├─ Company (e.g. "CP Inc.")
+//     │    └─ Participant (a person at that company)
+//     │          └─ Membership (that person invited into a Pilot)
+//     └─ Pilot
+//          ├─ Question (typed fields)
+//          └─ Submission → Answer (a participant's dated entry)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  PM
+  COMPANY_ADMIN
+  PARTICIPANT
+}
+
+enum QuestionType {
+  TEXT
+  TEXTAREA
+  NUMBER
+  BOOLEAN
+  SELECT
+  RATING
+}
+
+enum MembershipStatus {
+  INVITED
+  ACCEPTED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  passwordHash String? // null until an invited user sets a password
+  role         Role     @default(PARTICIPANT)
+  createdAt    DateTime @default(now())
+
+  applications        Application[] @relation("AppOwner") // a PM can own many applications
+  companies           Company[]     @relation("CompanyOwner") // companies this PM manages (top-level)
+  adminCompanies      Company[]     @relation("CompanyAdmin") // companies this user administers
+  participantProfiles Participant[] // identities this user has accepted
+  submissions         Submission[]
+  comments            Comment[]
+}
+
+// An application owned by a PM — a product being piloted. A PM can own many.
+// Owns the pilots and the roster of partner companies.
+model Application {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  ownerId     String
+  owner       User     @relation("AppOwner", fields: [ownerId], references: [id])
+  createdAt   DateTime @default(now())
+
+  pilots   Pilot[]
+  features Feature[]
+}
+
+// A partner organization, owned by the PM at the top level (same level as an
+// Application) so it can be reused across pilots in any of the PM's apps.
+// Each company has an admin (by email) who manages that company's people.
+model Company {
+  id              String   @id @default(cuid())
+  ownerId         String
+  owner           User     @relation("CompanyOwner", fields: [ownerId], references: [id])
+  name            String
+  adminEmail      String
+  adminUserId     String? // linked User once the admin sets up their account
+  adminUser       User?    @relation("CompanyAdmin", fields: [adminUserId], references: [id])
+  adminInviteToken String  @unique @default(cuid()) // for the admin to set up their account
+  createdAt       DateTime @default(now())
+
+  participants   Participant[]
+  pilotCompanies PilotCompany[]
+
+  @@unique([ownerId, name])
+}
+
+// A person belonging to one company. The same person can be invited into
+// multiple pilots (via Membership) — across different applications — but has a
+// single company + identity here.
+model Participant {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  email     String
+  name      String?
+  userId    String? // linked User once they accept an invite
+  user      User?   @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+
+  memberships Membership[]
+
+  @@unique([companyId, email])
+}
+
+model Pilot {
+  id            String      @id @default(cuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  name          String
+  description   String?
+  // Status (upcoming / active / past) is computed from these at read time.
+  startDate     DateTime?
+  endDate       DateTime?
+  createdAt     DateTime    @default(now())
+
+  questions      Question[]
+  memberships    Membership[]
+  submissions    Submission[]
+  pilotCompanies PilotCompany[]
+  comments       Comment[]
+}
+
+// A company added into a pilot by the PM. Emailing this triggers the company's
+// admin to manage their people for that pilot. Carries an open self-enroll link.
+model PilotCompany {
+  id         String   @id @default(cuid())
+  pilotId    String
+  pilot      Pilot    @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  shareToken String   @unique @default(cuid()) // open link for people to self-enroll
+  invitedAt  DateTime @default(now())
+
+  @@unique([pilotId, companyId])
+}
+
+model Question {
+  id       String       @id @default(cuid())
+  pilotId  String
+  pilot    Pilot        @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  label    String
+  helpText String?
+  type     QuestionType @default(TEXT)
+  options  Json? // choices for SELECT; { min, max } for RATING
+  required Boolean      @default(false)
+  order    Int          @default(0)
+
+  answers Answer[]
+}
+
+// Links a Participant into a specific Pilot — i.e. the invitation.
+model Membership {
+  id            String           @id @default(cuid())
+  pilotId       String
+  pilot         Pilot            @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  participantId String
+  participant   Participant      @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  inviteToken   String           @unique
+  status        MembershipStatus @default(INVITED)
+  invitedAt     DateTime         @default(now())
+  acceptedAt    DateTime?
+
+  @@unique([pilotId, participantId])
+}
+
+// A participant can create many submissions per pilot over time, building a
+// history. At most one is an open draft (submittedAt = null); the rest are
+// finalized, dated entries.
+model Submission {
+  id          String    @id @default(cuid())
+  pilotId     String
+  pilot       Pilot     @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  submittedAt DateTime? // null while still a draft
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  answers Answer[]
+
+  @@index([pilotId, userId])
+}
+
+model Answer {
+  id           String     @id @default(cuid())
+  submissionId String
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  questionId   String
+  question     Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  value        String? // stored as string; parsed per question type on read
+
+  @@unique([submissionId, questionId])
+}
+
+// A feature of the application that participants can tag in comments.
+// Managed by the PM (app admin) at the application level.
+model Feature {
+  id            String      @id @default(cuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  name          String
+  description   String?
+  createdAt     DateTime    @default(now())
+
+  comments Comment[]
+
+  @@unique([applicationId, name])
+}
+
+enum CommentCategory {
+  ENHANCEMENT
+  BUG
+  FEATURE_REQUEST
+  REMOVE_FEATURE
+  USABILITY
+  PERFORMANCE
+  PRAISE
+  QUESTION
+  OTHER
+}
+
+// A flexible piece of feedback a participant leaves within a pilot: a reason
+// (body), a category, optional image attachments, and links to app features.
+model Comment {
+  id        String          @id @default(cuid())
+  pilotId   String
+  pilot     Pilot           @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User            @relation(fields: [userId], references: [id])
+  body      String
+  category  CommentCategory @default(OTHER)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  images   CommentImage[]
+  features Feature[]
+}
+
+model CommentImage {
+  id        String   @id @default(cuid())
+  commentId String
+  comment   Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  url       String // served from /uploads
+  createdAt DateTime @default(now())
+}

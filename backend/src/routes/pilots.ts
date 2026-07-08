@@ -1,0 +1,560 @@
+import { Router } from "express";
+import { randomBytes } from "crypto";
+import { z } from "zod";
+import { prisma } from "../prisma";
+import { asyncHandler, HttpError } from "../lib/http";
+import { authenticate, requireRole } from "../middleware/auth";
+import { pilotStatus } from "../lib/pilotStatus";
+import { config } from "../config";
+import { sendEmail, inviteEmail, adminInviteEmail, adminNotifyEmail } from "../lib/email";
+
+// Single-pilot operations. Listing/creating pilots lives on the applications
+// router (scoped to an application: /applications/:appId/pilots).
+export const pilotsRouter = Router();
+
+// All routes here require an authenticated PM.
+pilotsRouter.use(authenticate, requireRole("PM"));
+
+/** Loads a pilot in the current PM's application or throws 404. */
+async function getOwnedPilot(pilotId: string, ownerId: string) {
+  const pilot = await prisma.pilot.findUnique({
+    where: { id: pilotId },
+    include: { application: true },
+  });
+  if (!pilot || pilot.application.ownerId !== ownerId) {
+    throw new HttpError(404, "Pilot not found");
+  }
+  return pilot;
+}
+
+const appBase = () => config.appUrl.replace(/\/$/, "");
+function inviteUrl(token: string): string {
+  return `${appBase()}/invite/${token}`;
+}
+function adminSetupUrl(token: string): string {
+  return `${appBase()}/admin/accept/${token}`;
+}
+function shareUrl(token: string): string {
+  return `${appBase()}/join/${token}`;
+}
+
+/**
+ * Ensures the company is recorded as participating in the pilot (PilotCompany).
+ * Returns the record; does not email anyone.
+ */
+async function ensurePilotCompany(pilotId: string, companyId: string) {
+  return prisma.pilotCompany.upsert({
+    where: { pilotId_companyId: { pilotId, companyId } },
+    create: { pilotId, companyId },
+    update: {},
+  });
+}
+
+const upsertPilotSchema = z.object({
+  name: z.string().min(1, "Name is required"),
+  description: z.string().optional().nullable(),
+  startDate: z.string().datetime().optional().nullable(),
+  endDate: z.string().datetime().optional().nullable(),
+});
+
+// GET /pilots/:id — full detail: questions, participants (with company), summary.
+pilotsRouter.get(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await prisma.pilot.findUnique({
+      where: { id: req.params.id },
+      include: {
+        questions: { orderBy: { order: "asc" } },
+        memberships: {
+          orderBy: { invitedAt: "asc" },
+          include: { participant: { include: { company: { select: { id: true, name: true } } } } },
+        },
+        submissions: { select: { userId: true, submittedAt: true } },
+        pilotCompanies: {
+          orderBy: { invitedAt: "asc" },
+          include: {
+            company: { include: { _count: { select: { participants: true } } } },
+          },
+        },
+      },
+    });
+    if (!pilot) throw new HttpError(404, "Pilot not found");
+
+    // How many finalized entries each participant has submitted.
+    const entryCount = new Map<string, number>();
+    for (const s of pilot.submissions) {
+      if (s.submittedAt) entryCount.set(s.userId, (entryCount.get(s.userId) ?? 0) + 1);
+    }
+
+    // Count this pilot's participants per company (via memberships).
+    const perCompany = new Map<string, number>();
+    for (const m of pilot.memberships) {
+      const cid = m.participant.company.id;
+      perCompany.set(cid, (perCompany.get(cid) ?? 0) + 1);
+    }
+
+    res.json({
+      pilot: {
+        id: pilot.id,
+        applicationId: pilot.applicationId,
+        name: pilot.name,
+        description: pilot.description,
+        startDate: pilot.startDate,
+        endDate: pilot.endDate,
+        createdAt: pilot.createdAt,
+        status: pilotStatus(pilot.startDate, pilot.endDate),
+        questions: pilot.questions,
+        companies: pilot.pilotCompanies.map((pc) => ({
+          id: pc.id,
+          company: { id: pc.company.id, name: pc.company.name },
+          adminEmail: pc.company.adminEmail,
+          adminJoined: pc.company.adminUserId !== null,
+          participantsInPilot: perCompany.get(pc.company.id) ?? 0,
+          shareUrl: shareUrl(pc.shareToken),
+        })),
+        participants: pilot.memberships.map((m) => ({
+          id: m.id,
+          email: m.participant.email,
+          name: m.participant.name,
+          company: m.participant.company,
+          status: m.status,
+          invitedAt: m.invitedAt,
+          acceptedAt: m.acceptedAt,
+          joined: m.participant.userId !== null,
+          inviteUrl: inviteUrl(m.inviteToken),
+          entryCount: m.participant.userId ? entryCount.get(m.participant.userId) ?? 0 : 0,
+        })),
+      },
+    });
+  })
+);
+
+// PATCH /pilots/:id — update basic fields.
+pilotsRouter.patch(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    const data = upsertPilotSchema.partial().parse(req.body);
+    const pilot = await prisma.pilot.update({
+      where: { id: req.params.id },
+      data: {
+        ...(data.name !== undefined ? { name: data.name } : {}),
+        ...(data.description !== undefined ? { description: data.description } : {}),
+        ...(data.startDate !== undefined
+          ? { startDate: data.startDate ? new Date(data.startDate) : null }
+          : {}),
+        ...(data.endDate !== undefined
+          ? { endDate: data.endDate ? new Date(data.endDate) : null }
+          : {}),
+      },
+    });
+    res.json({ pilot: { ...pilot, status: pilotStatus(pilot.startDate, pilot.endDate) } });
+  })
+);
+
+// DELETE /pilots/:id — remove a pilot and everything under it (cascade).
+pilotsRouter.delete(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    await prisma.pilot.delete({ where: { id: req.params.id } });
+    res.status(204).end();
+  })
+);
+
+/* ----------------------------- Questions ----------------------------- */
+
+const questionSchema = z.object({
+  label: z.string().min(1, "Question label is required"),
+  helpText: z.string().optional().nullable(),
+  type: z.enum(["TEXT", "TEXTAREA", "NUMBER", "BOOLEAN", "SELECT", "RATING"]),
+  options: z.any().optional(),
+  required: z.boolean().optional(),
+  order: z.number().int().optional(),
+});
+
+// POST /pilots/:id/questions — add a question.
+pilotsRouter.post(
+  "/:id/questions",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    const data = questionSchema.parse(req.body);
+    const max = await prisma.question.aggregate({
+      where: { pilotId: req.params.id },
+      _max: { order: true },
+    });
+    const question = await prisma.question.create({
+      data: {
+        pilotId: req.params.id,
+        label: data.label,
+        helpText: data.helpText ?? null,
+        type: data.type,
+        options: data.options ?? undefined,
+        required: data.required ?? false,
+        order: data.order ?? (max._max.order ?? -1) + 1,
+      },
+    });
+    res.status(201).json({ question });
+  })
+);
+
+// PATCH /pilots/:id/questions/:qid — edit a question.
+pilotsRouter.patch(
+  "/:id/questions/:qid",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    const data = questionSchema.partial().parse(req.body);
+    const existing = await prisma.question.findUnique({ where: { id: req.params.qid } });
+    if (!existing || existing.pilotId !== req.params.id) {
+      throw new HttpError(404, "Question not found");
+    }
+    const question = await prisma.question.update({
+      where: { id: req.params.qid },
+      data: {
+        ...(data.label !== undefined ? { label: data.label } : {}),
+        ...(data.helpText !== undefined ? { helpText: data.helpText } : {}),
+        ...(data.type !== undefined ? { type: data.type } : {}),
+        ...(data.options !== undefined ? { options: data.options ?? undefined } : {}),
+        ...(data.required !== undefined ? { required: data.required } : {}),
+        ...(data.order !== undefined ? { order: data.order } : {}),
+      },
+    });
+    res.json({ question });
+  })
+);
+
+// DELETE /pilots/:id/questions/:qid
+pilotsRouter.delete(
+  "/:id/questions/:qid",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    const existing = await prisma.question.findUnique({ where: { id: req.params.qid } });
+    if (!existing || existing.pilotId !== req.params.id) {
+      throw new HttpError(404, "Question not found");
+    }
+    await prisma.question.delete({ where: { id: req.params.qid } });
+    res.status(204).end();
+  })
+);
+
+/* ---------------------------- Invitations ---------------------------- */
+
+const inviteSchema = z.object({
+  email: z.string().email(),
+  name: z.string().optional().nullable(),
+  companyId: z.string().optional(),
+  companyName: z.string().optional(),
+  companyAdminEmail: z.string().email().optional(), // required when creating a new company
+  sendEmail: z.boolean().optional().default(true),
+});
+
+// POST /pilots/:id/invitations — invite a person (resolving their company) into
+// the pilot. Reuses the app-level participant if they already exist.
+pilotsRouter.post(
+  "/:id/invitations",
+  asyncHandler(async (req, res) => {
+    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const ownerId = req.user!.sub;
+    const { email, name, companyId, companyName, companyAdminEmail, sendEmail: shouldSend } =
+      inviteSchema.parse(req.body);
+
+    // Resolve the company among the PM's companies (top-level).
+    let company;
+    if (companyId) {
+      company = await prisma.company.findUnique({ where: { id: companyId } });
+      if (!company || company.ownerId !== ownerId) throw new HttpError(404, "Company not found");
+    } else if (companyName && companyName.trim()) {
+      const cname = companyName.trim();
+      company = await prisma.company.findUnique({
+        where: { ownerId_name: { ownerId, name: cname } },
+      });
+      if (!company) {
+        if (!companyAdminEmail) {
+          throw new HttpError(400, "A new company needs an admin email");
+        }
+        company = await prisma.company.create({
+          data: { ownerId, name: cname, adminEmail: companyAdminEmail },
+        });
+      }
+    } else {
+      throw new HttpError(400, "A company is required");
+    }
+
+    // Reuse or create the participant under this company.
+    const participant = await prisma.participant.upsert({
+      where: { companyId_email: { companyId: company.id, email } },
+      create: { companyId: company.id, email, name: name ?? null },
+      update: { ...(name ? { name } : {}) },
+    });
+
+    const existing = await prisma.membership.findUnique({
+      where: { pilotId_participantId: { pilotId: pilot.id, participantId: participant.id } },
+    });
+    if (existing) throw new HttpError(409, "That person is already invited to this pilot");
+
+    const token = randomBytes(24).toString("hex");
+    const membership = await prisma.membership.create({
+      data: { pilotId: pilot.id, participantId: participant.id, inviteToken: token },
+    });
+    // Keep the "companies in this pilot" view complete when a PM invites someone
+    // directly from a company that wasn't added to the pilot yet.
+    await ensurePilotCompany(pilot.id, company.id);
+
+    const url = inviteUrl(token);
+    if (shouldSend) {
+      const inviter = await prisma.user.findUnique({ where: { id: req.user!.sub } });
+      await sendEmail(inviteEmail({ to: email, pilotName: pilot.name, inviteUrl: url, inviterName: inviter?.name }));
+    }
+
+    res.status(201).json({
+      participant: {
+        id: membership.id,
+        email: participant.email,
+        name: participant.name,
+        company: { id: company.id, name: company.name },
+        status: membership.status,
+        invitedAt: membership.invitedAt,
+        inviteUrl: url,
+      },
+    });
+  })
+);
+
+// POST /pilots/:id/invitations/:mid/resend — re-send the invite email.
+pilotsRouter.post(
+  "/:id/invitations/:mid/resend",
+  asyncHandler(async (req, res) => {
+    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const membership = await prisma.membership.findUnique({
+      where: { id: req.params.mid },
+      include: { participant: true },
+    });
+    if (!membership || membership.pilotId !== pilot.id) {
+      throw new HttpError(404, "Invitation not found");
+    }
+    const url = inviteUrl(membership.inviteToken);
+    const inviter = await prisma.user.findUnique({ where: { id: req.user!.sub } });
+    await sendEmail(
+      inviteEmail({ to: membership.participant.email, pilotName: pilot.name, inviteUrl: url, inviterName: inviter?.name })
+    );
+    res.json({ ok: true, inviteUrl: url });
+  })
+);
+
+// DELETE /pilots/:id/invitations/:mid — revoke a participant from this pilot.
+pilotsRouter.delete(
+  "/:id/invitations/:mid",
+  asyncHandler(async (req, res) => {
+    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const membership = await prisma.membership.findUnique({ where: { id: req.params.mid } });
+    if (!membership || membership.pilotId !== pilot.id) {
+      throw new HttpError(404, "Invitation not found");
+    }
+    await prisma.membership.delete({ where: { id: membership.id } });
+    res.status(204).end();
+  })
+);
+
+/* ------------------------- Companies in a pilot ------------------------- */
+
+/** Emails a company's admin about a pilot (setup link if new, else notify). */
+async function emailCompanyAdmin(
+  company: { name: string; adminEmail: string; adminUserId: string | null; adminInviteToken: string },
+  pilotName: string,
+  inviterName?: string | null
+) {
+  if (company.adminUserId) {
+    await sendEmail(
+      adminNotifyEmail({
+        to: company.adminEmail,
+        companyName: company.name,
+        pilotName,
+        manageUrl: `${appBase()}/admin`,
+        inviterName,
+      })
+    );
+  } else {
+    await sendEmail(
+      adminInviteEmail({
+        to: company.adminEmail,
+        companyName: company.name,
+        pilotName,
+        setupUrl: adminSetupUrl(company.adminInviteToken),
+        inviterName,
+      })
+    );
+  }
+}
+
+const addCompanySchema = z.object({ companyId: z.string() });
+
+// POST /pilots/:id/companies — add a company to the pilot and email its admin.
+pilotsRouter.post(
+  "/:id/companies",
+  asyncHandler(async (req, res) => {
+    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const { companyId } = addCompanySchema.parse(req.body);
+    const company = await prisma.company.findUnique({ where: { id: companyId } });
+    if (!company || company.ownerId !== req.user!.sub) {
+      throw new HttpError(404, "Company not found");
+    }
+    const existing = await prisma.pilotCompany.findUnique({
+      where: { pilotId_companyId: { pilotId: pilot.id, companyId } },
+    });
+    if (existing) throw new HttpError(409, "That company is already in this pilot");
+
+    const pc = await prisma.pilotCompany.create({
+      data: { pilotId: pilot.id, companyId },
+    });
+    const inviter = await prisma.user.findUnique({ where: { id: req.user!.sub } });
+    await emailCompanyAdmin(company, pilot.name, inviter?.name);
+
+    res.status(201).json({
+      pilotCompany: {
+        id: pc.id,
+        company: { id: company.id, name: company.name },
+        adminEmail: company.adminEmail,
+        adminJoined: company.adminUserId !== null,
+        participantsInPilot: 0,
+        shareUrl: shareUrl(pc.shareToken),
+      },
+    });
+  })
+);
+
+// DELETE /pilots/:id/companies/:pcId — remove a company from the pilot.
+pilotsRouter.delete(
+  "/:id/companies/:pcId",
+  asyncHandler(async (req, res) => {
+    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const pc = await prisma.pilotCompany.findUnique({ where: { id: req.params.pcId } });
+    if (!pc || pc.pilotId !== pilot.id) throw new HttpError(404, "Not found");
+    await prisma.pilotCompany.delete({ where: { id: pc.id } });
+    res.status(204).end();
+  })
+);
+
+// POST /pilots/:id/companies/:pcId/resend — re-email the company admin.
+pilotsRouter.post(
+  "/:id/companies/:pcId/resend",
+  asyncHandler(async (req, res) => {
+    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const pc = await prisma.pilotCompany.findUnique({
+      where: { id: req.params.pcId },
+      include: { company: true },
+    });
+    if (!pc || pc.pilotId !== pilot.id) throw new HttpError(404, "Not found");
+    const inviter = await prisma.user.findUnique({ where: { id: req.user!.sub } });
+    await emailCompanyAdmin(pc.company, pilot.name, inviter?.name);
+    res.json({ ok: true });
+  })
+);
+
+/* ----------------------------- Responses ----------------------------- */
+
+// GET /pilots/:id/responses — every submitted entry with its answers, plus the
+// submitter's company (via their app-level participant record).
+pilotsRouter.get(
+  "/:id/responses",
+  asyncHandler(async (req, res) => {
+    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const submissions = await prisma.submission.findMany({
+      where: { pilotId: req.params.id, submittedAt: { not: null } },
+      orderBy: { submittedAt: "desc" },
+      include: { user: { select: { id: true, name: true, email: true } }, answers: true },
+    });
+
+    // Map userId -> { name, company } using this pilot's memberships.
+    const memberships = await prisma.membership.findMany({
+      where: { pilotId: req.params.id, participant: { userId: { not: null } } },
+      include: { participant: { include: { company: { select: { name: true } } } } },
+    });
+    const byUser = new Map(
+      memberships.map((m) => [m.participant.userId!, m.participant])
+    );
+
+    res.json({
+      responses: submissions.map((s) => {
+        const p = byUser.get(s.user.id);
+        return {
+          id: s.id,
+          user: s.user,
+          company: p?.company.name ?? null,
+          participantName: p?.name ?? s.user.name,
+          submittedAt: s.submittedAt,
+          answers: Object.fromEntries(s.answers.map((a) => [a.questionId, a.value])),
+        };
+      }),
+    });
+  })
+);
+
+// DELETE /pilots/:id/responses/:sid — the PM deletes a submitted response.
+pilotsRouter.delete(
+  "/:id/responses/:sid",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    const submission = await prisma.submission.findUnique({ where: { id: req.params.sid } });
+    if (!submission || submission.pilotId !== req.params.id) {
+      throw new HttpError(404, "Response not found");
+    }
+    await prisma.submission.delete({ where: { id: submission.id } }); // cascades answers
+    res.status(204).end();
+  })
+);
+
+/* ------------------------------ Comments ------------------------------ */
+
+// GET /pilots/:id/comments — all feedback comments on the pilot (PM view).
+pilotsRouter.get(
+  "/:id/comments",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    const comments = await prisma.comment.findMany({
+      where: { pilotId: req.params.id },
+      orderBy: { createdAt: "desc" },
+      include: {
+        user: { select: { id: true, name: true, email: true } },
+        features: true,
+        images: true,
+      },
+    });
+
+    // Map author userId -> company name via this pilot's memberships.
+    const memberships = await prisma.membership.findMany({
+      where: { pilotId: req.params.id, participant: { userId: { not: null } } },
+      include: { participant: { include: { company: { select: { name: true } } } } },
+    });
+    const companyByUser = new Map(
+      memberships.map((m) => [m.participant.userId!, m.participant.company.name])
+    );
+
+    res.json({
+      comments: comments.map((c) => ({
+        id: c.id,
+        body: c.body,
+        category: c.category,
+        createdAt: c.createdAt,
+        author: { name: c.user.name, email: c.user.email },
+        company: companyByUser.get(c.user.id) ?? null,
+        features: c.features.map((f) => ({ id: f.id, name: f.name })),
+        images: c.images.map((i) => ({ id: i.id, url: i.url })),
+      })),
+    });
+  })
+);
+
+// DELETE /pilots/:id/comments/:cid — the PM removes a comment.
+pilotsRouter.delete(
+  "/:id/comments/:cid",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    const comment = await prisma.comment.findUnique({ where: { id: req.params.cid } });
+    if (!comment || comment.pilotId !== req.params.id) {
+      throw new HttpError(404, "Comment not found");
+    }
+    await prisma.comment.delete({ where: { id: comment.id } }); // cascades images
+    res.status(204).end();
+  })
+);

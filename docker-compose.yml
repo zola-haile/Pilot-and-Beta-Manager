@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: manage_pilots_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pilots
+      POSTGRES_PASSWORD: pilots
+      POSTGRES_DB: pilots
+    ports:
+      - "5433:5432"
+    volumes:
+      - pilots_pgdata:/var/lib/postgresql/data
+
+volumes:
+  pilots_pgdata:
