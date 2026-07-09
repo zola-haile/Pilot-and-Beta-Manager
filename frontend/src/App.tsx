@@ -3,6 +3,8 @@ import { useAuth } from "./auth";
 import { Spinner } from "./components";
 import { LoginPage, RegisterPage } from "./pages/Auth";
 import { ApplicationsListPage, ApplicationDetailPage } from "./pages/Applications";
+import { FeedbackPage } from "./pages/Feedback";
+import { AppAnalyticsPage, PilotAnalyticsPage } from "./pages/Analytics";
 import { CompaniesPage, CompanyDetailPage } from "./pages/Companies";
 import { PilotDetailPage } from "./pages/PilotDetail";
 import { InviteAcceptPage } from "./pages/InviteAccept";
@@ -72,6 +74,22 @@ export default function App() {
         }
       />
       <Route
+        path="/applications/:appId/feedback"
+        element={
+          <RequireAuth>
+            <FeedbackPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/applications/:appId/analytics"
+        element={
+          <RequireAuth>
+            <AppAnalyticsPage />
+          </RequireAuth>
+        }
+      />
+      <Route
         path="/companies"
         element={
           <RequireAuth>
@@ -92,6 +110,14 @@ export default function App() {
         element={
           <RequireAuth>
             <PilotDetailPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/pilots/:id/analytics"
+        element={
+          <RequireAuth>
+            <PilotAnalyticsPage />
           </RequireAuth>
         }
       />

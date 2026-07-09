@@ -15,11 +15,13 @@ frontend/  React + Vite + TypeScript
 PM
  ├─ Application  (a product being piloted — a PM owns many)
  │    ├─ Feature (a taggable part of the app; PM-managed)
+ │    ├─ Theme   (a cross-pilot insight the PM groups comments under)
  │    └─ Pilot
  │         ├─ Question (typed fields)
  │         ├─ PilotCompany (a company added to this pilot; carries a share link)
  │         ├─ Submission → Answer (a participant's dated entry; many over time)
  │         └─ Comment  (flexible feedback: body + category + features + images)
+ │              └─ triage: status · priority · assignee · notes · duplicate-of · theme
  └─ Company  (top-level, reusable across pilots in ANY of the PM's apps)
       └─ Participant (a person at that company)
             └─ Membership (that person invited into a pilot)
@@ -30,6 +32,28 @@ Participants can also leave **flexible comments** on a pilot: free-text reason, 
 performance / praise / question / other), tagged **features** (from the app's feature
 list), and **image attachments**. The PM manages the feature list per application and
 sees all comments on each pilot.
+
+**Triage** — the PM turns comments into work. Each comment carries a workflow
+**status** (New → Triaged → Planned → In progress → Done / Won't do / Duplicate), a
+**priority** (low/medium/high/critical), a free-text **assignee**, and a private
+**notes** thread (never shown to participants). Comments can be **merged** as a duplicate
+of a canonical one (which then shows "N duplicates"), or folded into an app-level
+**Theme** — a recurring insight that gathers related feedback across every pilot in the
+app.
+
+**Feedback workspace** — the same surface works per-pilot and per-application
+(`/applications/:appId/feedback`, aggregating every pilot). It offers an **Inbox** table
+and a drag-to-move **Kanban board** by status; **filters** by keyword, type, feature,
+company, status, priority, pilot, date range, and has-images; and **bulk actions** to set
+status/priority/assignee, add to a theme, or merge many comments at once.
+
+**Analytics dashboard** — per-pilot and per-application (`…/analytics`), with no external
+chart libraries (inline SVG/CSS). It shows sentiment (derived from category), a type
+breakdown, a **feedback-over-time** trend (volume + sentiment), a **feature × type
+heatmap**, leaderboards (top requests / most-reported bugs / most praised), a **by-company**
+table with participation rates and tone, and **structured-answer rollups**: per rating
+question an average + distribution + over-time trend + an NPS-style score, plus yes/no
+splits and multiple-choice tallies. The app view rolls ratings up across all pilots.
 
 Applications and Companies are **siblings** under the PM: a company (with its admin and
 people) can be added to pilots across several applications.
@@ -117,7 +141,14 @@ participant flow.
 | GET/POST | `/applications/:appId/pilots` | PM | List / create pilots in an application |
 | GET/POST | `/applications/:appId/features` | PM | List / add app features |
 | PATCH/DELETE | `/features/:id` | PM | Edit / delete a feature |
-| GET/DELETE | `/pilots/:id/comments[/:cid]` | PM | View / delete pilot comments |
+| GET/POST | `/applications/:appId/themes` | PM | List / add feedback themes |
+| PATCH/DELETE | `/themes/:id` | PM | Rename / delete a theme |
+| GET/PATCH/DELETE | `/pilots/:id/comments[/:cid]` | PM | View / triage / delete pilot comments |
+| POST/DELETE | `/pilots/:id/comments/:cid/notes[/:nid]` | PM | Add / delete a private triage note |
+| GET | `/applications/:appId/comments` | PM | All comments across the app's pilots (Feedback view) |
+| PATCH | `/applications/:appId/comments/bulk` | PM | Bulk triage: set status/priority/assignee/theme, or merge |
+| GET | `/pilots/:id/analytics` | PM | Analytics for one pilot (+ structured-answer rollups) |
+| GET | `/applications/:appId/analytics` | PM | Analytics across the app (+ ratings roll-up) |
 | POST/GET/DELETE | `/my/pilots/:id/comments[/:cid]` | participant | Add / list own / delete comment |
 | GET/POST | `/companies` | PM | List / add companies (top-level; admin email required) |
 | GET/PATCH/DELETE | `/companies/:id` | PM | Company drill-down (across apps) / edit / delete |

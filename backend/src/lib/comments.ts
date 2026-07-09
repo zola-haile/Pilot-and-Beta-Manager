@@ -13,3 +13,25 @@ export const COMMENT_CATEGORIES = [
 ] as const;
 
 export const CATEGORY_VALUES = COMMENT_CATEGORIES.map((c) => c.value) as [string, ...string[]];
+
+// Triage workflow statuses the PM moves a comment through.
+export const COMMENT_STATUSES = [
+  { value: "NEW", label: "New" },
+  { value: "TRIAGED", label: "Triaged" },
+  { value: "PLANNED", label: "Planned" },
+  { value: "IN_PROGRESS", label: "In progress" },
+  { value: "DONE", label: "Done" },
+  { value: "WONT_DO", label: "Won't do" },
+  { value: "DUPLICATE", label: "Duplicate" },
+] as const;
+
+export const STATUS_VALUES = COMMENT_STATUSES.map((s) => s.value) as [string, ...string[]];
+
+export const COMMENT_PRIORITIES = [
+  { value: "LOW", label: "Low" },
+  { value: "MEDIUM", label: "Medium" },
+  { value: "HIGH", label: "High" },
+  { value: "CRITICAL", label: "Critical" },
+] as const;
+
+export const PRIORITY_VALUES = COMMENT_PRIORITIES.map((p) => p.value) as [string, ...string[]];

@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { Layout, Spinner, StatusBadge } from "../components";
-import { CommentCard } from "./ParticipantForm";
+import { FeedbackWorkspace } from "./Feedback";
 
 const QUESTION_TYPES = [
   { value: "TEXT", label: "Short text" },
@@ -113,9 +113,14 @@ export function PilotDetailPage() {
           <h1 style={{ margin: 0 }}>{pilot.name}</h1>
           <StatusBadge status={pilot.status} />
         </div>
-        <button className="btn-danger btn-sm" onClick={deletePilot}>
-          Delete pilot
-        </button>
+        <div className="row">
+          <Link className="btn-ghost btn-sm" to={`/pilots/${pilot.id}/analytics`}>
+            📊 Analytics
+          </Link>
+          <button className="btn-danger btn-sm" onClick={deletePilot}>
+            Delete pilot
+          </button>
+        </div>
       </div>
       {pilot.description && <p className="muted">{pilot.description}</p>}
       <p className="muted" style={{ marginTop: 0 }}>
@@ -127,7 +132,20 @@ export function PilotDetailPage() {
         <CompaniesInPilotSection pilotId={pilot.id} companies={pilot.companies} onChange={load} />
         <ParticipantsSection pilotId={pilot.id} participants={pilot.participants} onChange={load} />
         <ResponsesSection pilotId={pilot.id} questions={pilot.questions} responses={responses} onChange={load} />
-        <PilotCommentsSection pilotId={pilot.id} />
+        <div className="card">
+          <div className="spread" style={{ marginBottom: 4 }}>
+            <h2 style={{ margin: 0 }}>Comments &amp; feedback</h2>
+            <Link to={`/applications/${pilot.applicationId}/feedback`} className="btn-ghost btn-sm">
+              All app feedback →
+            </Link>
+          </div>
+          <FeedbackWorkspace
+            scope="pilot"
+            fetchPath={`/pilots/${pilot.id}/comments`}
+            applicationId={pilot.applicationId}
+            pilotId={pilot.id}
+          />
+        </div>
       </div>
     </Layout>
   );
@@ -662,62 +680,4 @@ function formatAnswer(q: Question, value: string | null | undefined): string {
   if (q.type === "BOOLEAN") return value === "true" ? "Yes" : "No";
   if (q.type === "RATING") return `${value} / 5`;
   return value;
-}
-
-interface PMComment {
-  id: string;
-  body: string;
-  category: string;
-  createdAt: string;
-  author: { name: string | null; email: string };
-  company: string | null;
-  features: { id: string; name: string }[];
-  images: { id: string; url: string }[];
-}
-
-function PilotCommentsSection({ pilotId }: { pilotId: string }) {
-  const [comments, setComments] = useState<PMComment[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  async function load() {
-    try {
-      const r = await api<{ comments: PMComment[] }>(`/pilots/${pilotId}/comments`);
-      setComments(r.comments);
-    } catch (err: any) {
-      setError(err.message);
-    }
-  }
-  useEffect(() => {
-    load();
-  }, [pilotId]);
-
-  async function remove(cid: string) {
-    if (!confirm("Delete this comment?")) return;
-    await api(`/pilots/${pilotId}/comments/${cid}`, { method: "DELETE" });
-    load();
-  }
-
-  return (
-    <div className="card">
-      <h2>Comments &amp; feedback ({comments?.length ?? 0})</h2>
-      {error && <div className="alert alert-error">{error}</div>}
-      {!comments ? (
-        <Spinner />
-      ) : comments.length === 0 ? (
-        <p className="muted">No comments yet.</p>
-      ) : (
-        <div className="stack">
-          {comments.map((c) => (
-            <CommentCard
-              key={c.id}
-              comment={c}
-              author={c.author.name ?? c.author.email}
-              company={c.company}
-              onDelete={() => remove(c.id)}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
 }

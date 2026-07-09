@@ -67,6 +67,7 @@ model Application {
 
   pilots   Pilot[]
   features Feature[]
+  themes   Theme[]
 }
 
 // A partner organization, owned by the PM at the top level (same level as an
@@ -224,8 +225,28 @@ enum CommentCategory {
   OTHER
 }
 
+// Triage workflow state the PM drives a comment through.
+enum CommentStatus {
+  NEW
+  TRIAGED
+  PLANNED
+  IN_PROGRESS
+  DONE
+  WONT_DO
+  DUPLICATE
+}
+
+enum CommentPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
 // A flexible piece of feedback a participant leaves within a pilot: a reason
 // (body), a category, optional image attachments, and links to app features.
+// The PM then triages it: status, priority, assignee, private notes, and can
+// mark it a duplicate of another comment or fold it into a cross-pilot Theme.
 model Comment {
   id        String          @id @default(cuid())
   pilotId   String
@@ -237,8 +258,47 @@ model Comment {
   createdAt DateTime        @default(now())
   updatedAt DateTime        @updatedAt
 
+  // Triage (PM-managed)
+  status   CommentStatus    @default(NEW)
+  priority CommentPriority? // null = unprioritized
+  assignee String? // free-text owner for now
+
+  // Duplicate merge: this comment is a duplicate of a canonical one.
+  duplicateOfId String?
+  duplicateOf   Comment?  @relation("CommentDuplicates", fields: [duplicateOfId], references: [id], onDelete: SetNull)
+  duplicates    Comment[] @relation("CommentDuplicates")
+
+  // Promotion into a tracked, app-level insight.
+  themeId String?
+  theme   Theme?  @relation(fields: [themeId], references: [id], onDelete: SetNull)
+
   images   CommentImage[]
   features Feature[]
+  notes    CommentNote[]
+}
+
+// A private PM annotation on a comment — never shown to participants.
+model CommentNote {
+  id        String   @id @default(cuid())
+  commentId String
+  comment   Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  body      String
+  createdAt DateTime @default(now())
+}
+
+// A cross-pilot insight the PM promotes a cluster of comments into. Lives at
+// the application level so it can gather feedback from any of the app's pilots.
+model Theme {
+  id            String      @id @default(cuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  name          String
+  description   String?
+  createdAt     DateTime    @default(now())
+
+  comments Comment[]
+
+  @@unique([applicationId, name])
 }
 
 model CommentImage {

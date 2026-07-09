@@ -7,6 +7,16 @@ import { authenticate, requireRole } from "../middleware/auth";
 import { pilotStatus } from "../lib/pilotStatus";
 import { config } from "../config";
 import { sendEmail, inviteEmail, adminInviteEmail, adminNotifyEmail } from "../lib/email";
+import {
+  STATUS_VALUES,
+  PRIORITY_VALUES,
+  COMMENT_STATUSES,
+  COMMENT_PRIORITIES,
+} from "../lib/comments";
+import { CommentStatus, CommentPriority } from "@prisma/client";
+import { commentAnalytics, questionRollups, sentimentScore } from "../lib/analytics";
+
+const OPEN_STATUSES = ["NEW", "TRIAGED", "PLANNED", "IN_PROGRESS"];
 
 // Single-pilot operations. Listing/creating pilots lives on the applications
 // router (scoped to an application: /applications/:appId/pilots).
@@ -506,11 +516,12 @@ pilotsRouter.delete(
 
 /* ------------------------------ Comments ------------------------------ */
 
-// GET /pilots/:id/comments — all feedback comments on the pilot (PM view).
+// GET /pilots/:id/comments — all feedback comments on the pilot (PM view), each
+// with its full triage state (status/priority/assignee/notes/duplicate/theme).
 pilotsRouter.get(
   "/:id/comments",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
     const comments = await prisma.comment.findMany({
       where: { pilotId: req.params.id },
       orderBy: { createdAt: "desc" },
@@ -518,7 +529,17 @@ pilotsRouter.get(
         user: { select: { id: true, name: true, email: true } },
         features: true,
         images: true,
+        notes: { orderBy: { createdAt: "asc" } },
+        theme: { select: { id: true, name: true } },
+        _count: { select: { duplicates: true } },
       },
+    });
+
+    // The app's themes, so the PM can fold a comment into an existing insight.
+    const themes = await prisma.theme.findMany({
+      where: { applicationId: pilot.applicationId },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true },
     });
 
     // Map author userId -> company name via this pilot's memberships.
@@ -540,7 +561,229 @@ pilotsRouter.get(
         company: companyByUser.get(c.user.id) ?? null,
         features: c.features.map((f) => ({ id: f.id, name: f.name })),
         images: c.images.map((i) => ({ id: i.id, url: i.url })),
+        status: c.status,
+        priority: c.priority,
+        assignee: c.assignee,
+        duplicateOfId: c.duplicateOfId,
+        duplicateCount: c._count.duplicates,
+        theme: c.theme,
+        notes: c.notes.map((n) => ({ id: n.id, body: n.body, createdAt: n.createdAt })),
       })),
+      statuses: COMMENT_STATUSES,
+      priorities: COMMENT_PRIORITIES,
+      themes,
+    });
+  })
+);
+
+const patchCommentSchema = z.object({
+  status: z.enum(STATUS_VALUES).optional(),
+  priority: z.enum(PRIORITY_VALUES).nullable().optional(),
+  assignee: z.string().max(120).nullable().optional(),
+  duplicateOfId: z.string().nullable().optional(),
+  themeId: z.string().nullable().optional(),
+});
+
+// PATCH /pilots/:id/comments/:cid — triage a comment.
+pilotsRouter.patch(
+  "/:id/comments/:cid",
+  asyncHandler(async (req, res) => {
+    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const comment = await prisma.comment.findUnique({ where: { id: req.params.cid } });
+    if (!comment || comment.pilotId !== req.params.id) {
+      throw new HttpError(404, "Comment not found");
+    }
+    const data = patchCommentSchema.parse(req.body);
+
+    // Validate a duplicate link: must point to another comment in the same pilot.
+    let statusFromDuplicate: CommentStatus | undefined;
+    if (data.duplicateOfId !== undefined && data.duplicateOfId !== null) {
+      if (data.duplicateOfId === comment.id) {
+        throw new HttpError(400, "A comment can't be a duplicate of itself");
+      }
+      const canonical = await prisma.comment.findUnique({ where: { id: data.duplicateOfId } });
+      if (!canonical || canonical.pilotId !== pilot.id) {
+        throw new HttpError(400, "Can only mark as a duplicate of another comment in this pilot");
+      }
+      statusFromDuplicate = CommentStatus.DUPLICATE; // marking a duplicate sets the status
+    }
+
+    // Validate a theme link: must belong to this pilot's application.
+    if (data.themeId !== undefined && data.themeId !== null) {
+      const theme = await prisma.theme.findUnique({ where: { id: data.themeId } });
+      if (!theme || theme.applicationId !== pilot.applicationId) {
+        throw new HttpError(400, "That theme doesn't belong to this application");
+      }
+    }
+
+    const updated = await prisma.comment.update({
+      where: { id: comment.id },
+      data: {
+        ...(data.status !== undefined ? { status: data.status as CommentStatus } : {}),
+        ...(statusFromDuplicate && data.status === undefined ? { status: statusFromDuplicate } : {}),
+        ...(data.priority !== undefined
+          ? { priority: (data.priority as CommentPriority) ?? null }
+          : {}),
+        ...(data.assignee !== undefined ? { assignee: data.assignee || null } : {}),
+        ...(data.duplicateOfId !== undefined ? { duplicateOfId: data.duplicateOfId } : {}),
+        ...(data.themeId !== undefined ? { themeId: data.themeId } : {}),
+      },
+      include: { theme: { select: { id: true, name: true } }, _count: { select: { duplicates: true } } },
+    });
+
+    res.json({
+      comment: {
+        id: updated.id,
+        status: updated.status,
+        priority: updated.priority,
+        assignee: updated.assignee,
+        duplicateOfId: updated.duplicateOfId,
+        duplicateCount: updated._count.duplicates,
+        theme: updated.theme,
+      },
+    });
+  })
+);
+
+// POST /pilots/:id/comments/:cid/notes — add a private PM note.
+const noteSchema = z.object({ body: z.string().min(1, "Note can't be empty") });
+pilotsRouter.post(
+  "/:id/comments/:cid/notes",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    const comment = await prisma.comment.findUnique({ where: { id: req.params.cid } });
+    if (!comment || comment.pilotId !== req.params.id) {
+      throw new HttpError(404, "Comment not found");
+    }
+    const { body } = noteSchema.parse(req.body);
+    const note = await prisma.commentNote.create({
+      data: { commentId: comment.id, body },
+    });
+    res.status(201).json({ note: { id: note.id, body: note.body, createdAt: note.createdAt } });
+  })
+);
+
+// DELETE /pilots/:id/comments/:cid/notes/:nid — remove a private note.
+pilotsRouter.delete(
+  "/:id/comments/:cid/notes/:nid",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    const note = await prisma.commentNote.findUnique({ where: { id: req.params.nid } });
+    if (!note || note.commentId !== req.params.cid) {
+      throw new HttpError(404, "Note not found");
+    }
+    await prisma.commentNote.delete({ where: { id: note.id } });
+    res.status(204).end();
+  })
+);
+
+/* ------------------------------ Analytics ----------------------------- */
+
+// GET /pilots/:id/analytics — full analytics for one pilot: comment breakdowns,
+// per-company engagement, and structured-answer rollups.
+pilotsRouter.get(
+  "/:id/analytics",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilotId = req.params.id;
+
+    const comments = await prisma.comment.findMany({
+      where: { pilotId },
+      select: {
+        category: true,
+        createdAt: true,
+        userId: true,
+        status: true,
+        features: { select: { id: true, name: true } },
+      },
+    });
+    const memberships = await prisma.membership.findMany({
+      where: { pilotId },
+      include: { participant: { include: { company: { select: { name: true } } } } },
+    });
+    const questions = await prisma.question.findMany({
+      where: { pilotId },
+      orderBy: { order: "asc" },
+    });
+    const submissions = await prisma.submission.findMany({
+      where: { pilotId, submittedAt: { not: null } },
+      include: { answers: true },
+    });
+
+    const comAnalyticsInput = comments.map((c) => ({
+      category: c.category,
+      createdAt: c.createdAt,
+      userId: c.userId,
+      features: c.features,
+    }));
+    const analytics = commentAnalytics(comAnalyticsInput);
+    const open = comments.filter((c) => OPEN_STATUSES.includes(c.status)).length;
+
+    // Company engagement: invited people, who's active, and their comment tone.
+    const companyByUser = new Map<string, string>();
+    const invited = new Map<string, number>();
+    for (const m of memberships) {
+      const name = m.participant.company.name;
+      invited.set(name, (invited.get(name) ?? 0) + 1);
+      if (m.participant.userId) companyByUser.set(m.participant.userId, name);
+    }
+    const activeByCompany = new Map<string, Set<string>>();
+    const markActive = (userId: string) => {
+      const co = companyByUser.get(userId);
+      if (!co) return;
+      const set = activeByCompany.get(co) ?? new Set<string>();
+      set.add(userId);
+      activeByCompany.set(co, set);
+    };
+    for (const s of submissions) markActive(s.userId);
+    const comStats = new Map<string, { comments: number; positive: number; negative: number }>();
+    for (const c of comments) {
+      const co = companyByUser.get(c.userId);
+      if (!co) continue;
+      markActive(c.userId);
+      const st = comStats.get(co) ?? { comments: 0, positive: 0, negative: 0 };
+      st.comments++;
+      const s = sentimentScore(c.category);
+      if (s > 0) st.positive++;
+      else if (s < 0) st.negative++;
+      comStats.set(co, st);
+    }
+    const byCompany = [...invited.entries()]
+      .map(([company, people]) => {
+        const active = activeByCompany.get(company)?.size ?? 0;
+        const st = comStats.get(company) ?? { comments: 0, positive: 0, negative: 0 };
+        return {
+          company,
+          participants: people,
+          active,
+          participationRate: people ? active / people : 0,
+          comments: st.comments,
+          positive: st.positive,
+          negative: st.negative,
+        };
+      })
+      .sort((a, b) => b.comments - a.comments || b.active - a.active);
+
+    const subInput = submissions.map((s) => ({
+      submittedAt: s.submittedAt!,
+      answers: Object.fromEntries(s.answers.map((a) => [a.questionId, a.value])),
+    }));
+    const questionsRollup = questionRollups(
+      questions.map((q) => ({ id: q.id, label: q.label, type: q.type, options: q.options })),
+      subInput
+    );
+
+    res.json({
+      scope: "pilot",
+      totals: {
+        comments: comments.length,
+        open,
+        participants: memberships.length,
+        responses: submissions.length,
+      },
+      ...analytics,
+      byCompany,
+      questions: questionsRollup,
     });
   })
 );

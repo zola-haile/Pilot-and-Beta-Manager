@@ -369,17 +369,22 @@ export function CommentCard({
   onDelete,
   author,
   company,
+  headerExtra,
+  footer,
 }: {
   comment: CommentItem;
   onDelete?: () => void;
   author?: string | null;
   company?: string | null;
+  headerExtra?: React.ReactNode; // extra badges next to the category (PM triage)
+  footer?: React.ReactNode; // triage controls rendered below the body (PM only)
 }) {
   return (
     <div className="card" style={{ boxShadow: "none", background: "#fafbfc" }}>
       <div className="spread">
-        <div className="row">
+        <div className="row" style={{ flexWrap: "wrap" }}>
           <span className="badge category-badge">{categoryLabel(comment.category)}</span>
+          {headerExtra}
           {author && <b>{author}</b>}
           {company && <span className="badge badge-past">{company}</span>}
         </div>
@@ -415,6 +420,7 @@ export function CommentCard({
           ))}
         </div>
       )}
+      {footer}
     </div>
   );
 }

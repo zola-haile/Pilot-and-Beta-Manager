@@ -199,6 +199,12 @@ export function ApplicationDetailPage() {
             {app.description && <p className="muted" style={{ margin: "6px 0 0" }}>{app.description}</p>}
           </div>
           <div className="row">
+            <Link className="btn-ghost btn-sm" to={`/applications/${app.id}/feedback`}>
+              💬 Feedback
+            </Link>
+            <Link className="btn-ghost btn-sm" to={`/applications/${app.id}/analytics`}>
+              📊 Analytics
+            </Link>
             <button className="btn-ghost btn-sm" onClick={() => setEditing(true)}>
               Edit
             </button>
@@ -252,7 +258,119 @@ export function ApplicationDetailPage() {
       <div style={{ marginTop: 28 }}>
         <FeaturesSection appId={app.id} />
       </div>
+      <div style={{ marginTop: 20 }}>
+        <ThemesSection appId={app.id} />
+      </div>
     </Layout>
+  );
+}
+
+interface Theme {
+  id: string;
+  name: string;
+  description: string | null;
+  commentCount: number;
+}
+
+function ThemesSection({ appId }: { appId: string }) {
+  const [themes, setThemes] = useState<Theme[] | null>(null);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function load() {
+    try {
+      const r = await api<{ themes: Theme[] }>(`/applications/${appId}/themes`);
+      setThemes(r.themes);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  }
+  useEffect(() => {
+    load();
+  }, [appId]);
+
+  async function add(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      await api(`/applications/${appId}/themes`, {
+        method: "POST",
+        body: { name, description: description || null },
+      });
+      setName("");
+      setDescription("");
+      load();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(id: string) {
+    if (!confirm("Delete this theme? Comments keep their content but are unlinked from it.")) return;
+    await api(`/themes/${id}`, { method: "DELETE" });
+    load();
+  }
+
+  return (
+    <div className="card">
+      <h2>Feedback themes</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        Recurring insights you group comments under — across every pilot in this app. You can also
+        create a theme on the fly while triaging a comment.
+      </p>
+      {error && <div className="alert alert-error">{error}</div>}
+      {!themes ? (
+        <Spinner />
+      ) : themes.length === 0 ? (
+        <p className="muted">No themes yet — group related feedback into one below.</p>
+      ) : (
+        <div>
+          {themes.map((t) => (
+            <div key={t.id} className="list-item">
+              <div style={{ minWidth: 0 }}>
+                <b>🔖 {t.name}</b>
+                <span className="muted" style={{ fontSize: 13, marginLeft: 8 }}>
+                  {t.commentCount} {t.commentCount === 1 ? "comment" : "comments"}
+                </span>
+                {t.description && (
+                  <div className="muted" style={{ fontSize: 13 }}>
+                    {t.description}
+                  </div>
+                )}
+              </div>
+              <button className="btn-danger btn-sm" onClick={() => remove(t.id)}>
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <form onSubmit={add} style={{ marginTop: 16 }}>
+        <div className="row" style={{ alignItems: "flex-start" }}>
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Theme name (e.g. Checkout confusing on mobile)"
+            required
+            style={{ flex: 1 }}
+          />
+          <button type="submit" disabled={busy}>
+            {busy ? "Adding…" : "Add theme"}
+          </button>
+        </div>
+        <input
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="Optional description"
+          style={{ marginTop: 8 }}
+        />
+      </form>
+    </div>
   );
 }
 

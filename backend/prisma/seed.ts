@@ -199,14 +199,56 @@ async function main() {
   await prisma.feature.create({ data: { applicationId: app2.id, name: "Mobile navigation" } });
   await prisma.feature.create({ data: { applicationId: app2.id, name: "Push notifications" } });
 
-  // --- A sample comment from Uma in Beta v2 ---
-  await prisma.comment.create({
+  // --- A feedback theme + sample comments in Beta v2, already triaged ---
+  const mobileTheme = await prisma.theme.create({
+    data: {
+      applicationId: app.id,
+      name: "Checkout hard to find on mobile",
+      description: "Several testers can't locate the checkout button on small screens.",
+    },
+  });
+
+  // Canonical, prioritized, planned, and folded into the theme — with a PM note.
+  const umaComment = await prisma.comment.create({
     data: {
       pilotId: beta.id,
       userId: uma.userId!,
       body: "The checkout button is hard to find on mobile — could it be more prominent?",
       category: "ENHANCEMENT",
+      status: "PLANNED",
+      priority: "HIGH",
+      assignee: "Dana (design)",
+      themeId: mobileTheme.id,
       features: { connect: [{ id: features[0].id }, { id: features[3].id }] },
+      notes: {
+        create: [{ body: "Reproduced on iPhone SE. Design to mock a sticky CTA for next sprint." }],
+      },
+    },
+  });
+
+  // A duplicate of Uma's report from another company, auto-marked DUPLICATE.
+  await prisma.comment.create({
+    data: {
+      pilotId: beta.id,
+      userId: ana.userId!,
+      body: "Couldn't find how to check out on my phone. Had to switch to desktop.",
+      category: "USABILITY",
+      status: "DUPLICATE",
+      duplicateOfId: umaComment.id,
+      themeId: mobileTheme.id,
+      features: { connect: [{ id: features[0].id }] },
+    },
+  });
+
+  // A fresh, untriaged bug awaiting attention.
+  await prisma.comment.create({
+    data: {
+      pilotId: beta.id,
+      userId: raj.userId!,
+      body: "Payment page threw an error the first time, worked on retry.",
+      category: "BUG",
+      priority: "CRITICAL",
+      features: { connect: [{ id: features[3].id }] },
     },
   });
 
