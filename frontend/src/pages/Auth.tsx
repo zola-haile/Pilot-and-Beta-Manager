@@ -63,7 +63,7 @@ export function LoginPage() {
         </button>
       </form>
       <p className="muted" style={{ marginBottom: 0, marginTop: 18, textAlign: "center" }}>
-        New here? <Link to="/register">Create a PM account</Link>
+        New here? <Link to="/register">Create an account</Link>
       </p>
     </AuthShell>
   );
@@ -72,6 +72,7 @@ export function LoginPage() {
 export function RegisterPage() {
   const { user, login } = useAuth();
   const navigate = useNavigate();
+  const [role, setRole] = useState<"PM" | "PARTICIPANT">("PM");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -88,7 +89,7 @@ export function RegisterPage() {
       const res = await api<{ token: string; user: User }>("/auth/register", {
         method: "POST",
         auth: false,
-        body: { name, email, password, role: "PM" },
+        body: { name, email, password, role },
       });
       login(res.token, res.user);
       navigate("/");
@@ -100,9 +101,30 @@ export function RegisterPage() {
   }
 
   return (
-    <AuthShell title="Create a Product Manager account">
+    <AuthShell title="Create your account">
       {error && <div className="alert alert-error">{error}</div>}
       <form onSubmit={submit}>
+        <div className="field">
+          <span>I'm signing up to…</span>
+          <div className="role-choice">
+            <button
+              type="button"
+              className={role === "PM" ? "role-card role-on" : "role-card"}
+              onClick={() => setRole("PM")}
+            >
+              <b>Run pilots</b>
+              <small>Create programs, invite testers, review feedback.</small>
+            </button>
+            <button
+              type="button"
+              className={role === "PARTICIPANT" ? "role-card role-on" : "role-card"}
+              onClick={() => setRole("PARTICIPANT")}
+            >
+              <b>Take part as a tester</b>
+              <small>Join pilots you're invited to and give feedback.</small>
+            </button>
+          </div>
+        </div>
         <label className="field">
           <span>Name</span>
           <input value={name} onChange={(e) => setName(e.target.value)} required />

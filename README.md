@@ -67,6 +67,15 @@ Three roles:
   self-enroll link) and optionally enrol themselves, toggling between admin and piloting views.
 - **Participant** — fills in the pilot's questions; can submit repeatedly over time.
 
+**Onboarding** — you either arrive through a link (an emailed invite or a company's
+self-enroll link) or you **sign up directly**: the register screen asks whether you're here
+to *run pilots* (PM) or *take part as a tester* (Participant). A signed-in tester doesn't need
+a fresh-account token — their home surfaces **pending invitations** addressed to their email
+(one-click accept), a **paste-a-link** box to join via any invite or self-enroll link, and,
+if a PM has designated their email as a company's admin, a prompt to **claim that admin seat**
+(which promotes them to Company Admin). Companies stay attached to a PM; a user becomes an
+admin by claiming an offered seat, not by creating an org.
+
 ## What's built
 
 **PM (Product Manager) side**
@@ -131,7 +140,7 @@ participant flow.
 
 | Method | Path | Who | Purpose |
 | --- | --- | --- | --- |
-| POST | `/auth/register` | public | Create a PM account |
+| POST | `/auth/register` | public | Create an account (PM or tester via `role`) |
 | POST | `/auth/login` | public | Sign in |
 | GET | `/auth/me` | auth | Current user |
 | GET | `/auth/invitations/:token` | public | Preview an invite |
@@ -167,6 +176,9 @@ participant flow.
 | POST/DELETE | `/pilots/:id/invitations[/:mid]` | PM | Invite / revoke participants |
 | POST | `/pilots/:id/invitations/:mid/resend` | PM | Resend an invite |
 | GET | `/pilots/:id/responses` | PM | All submitted responses |
+| GET/POST | `/my/invitations[/:token/accept]` | auth | Pending invites for my email / accept one |
+| POST | `/my/join` | auth | Join a pilot via a self-enroll share token |
+| GET/POST | `/my/admin-claims[/:companyId/accept]` | auth | Offered admin seats / claim one (re-issues token) |
 | GET | `/my/pilots` | participant | Pilots I'm in |
 | GET | `/my/pilots/:id` | participant | Questions + my answers |
 | PUT | `/my/pilots/:id/submission` | participant | Save draft / submit |

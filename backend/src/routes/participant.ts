@@ -1,8 +1,10 @@
 import { Router } from "express";
+import { randomBytes } from "crypto";
 import { z } from "zod";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { authenticate } from "../middleware/auth";
+import { signToken } from "../lib/jwt";
 import { pilotStatus } from "../lib/pilotStatus";
 import { CommentCategory } from "@prisma/client";
 import { COMMENT_CATEGORIES, CATEGORY_VALUES } from "../lib/comments";
@@ -281,5 +283,147 @@ participantRouter.delete(
     }
     await prisma.comment.delete({ where: { id: comment.id } }); // cascades images
     res.status(204).end();
+  })
+);
+
+/* ------------------------- Self-serve onboarding ------------------------- */
+// These let a signed-in user (e.g. a tester who registered on their own) pick up
+// invitations, join via a shared link, or claim an offered company-admin seat —
+// all tied to the account they're already logged into, no fresh-account token.
+
+/** Loads the current user, or throws. */
+async function currentUser(userId: string) {
+  const me = await prisma.user.findUnique({ where: { id: userId } });
+  if (!me) throw new HttpError(404, "User not found");
+  return me;
+}
+
+// GET /my/invitations — pilot invites addressed to my email that I haven't accepted.
+participantRouter.get(
+  "/invitations",
+  asyncHandler(async (req, res) => {
+    const me = await currentUser(req.user!.sub);
+    const memberships = await prisma.membership.findMany({
+      where: { status: "INVITED", participant: { is: { email: me.email } } },
+      include: { pilot: true, participant: { include: { company: true } } },
+      orderBy: { invitedAt: "desc" },
+    });
+    res.json({
+      invitations: memberships.map((m) => ({
+        token: m.inviteToken,
+        pilot: { id: m.pilot.id, name: m.pilot.name, description: m.pilot.description },
+        company: m.participant.company.name,
+      })),
+    });
+  })
+);
+
+// POST /my/invitations/:token/accept — accept an invite addressed to my email.
+participantRouter.post(
+  "/invitations/:token/accept",
+  asyncHandler(async (req, res) => {
+    const me = await currentUser(req.user!.sub);
+    const membership = await prisma.membership.findUnique({
+      where: { inviteToken: req.params.token },
+      include: { participant: true },
+    });
+    if (!membership) throw new HttpError(404, "Invitation not found");
+    if (membership.participant.email.toLowerCase() !== me.email.toLowerCase()) {
+      throw new HttpError(403, "This invitation was sent to a different email address");
+    }
+    await prisma.participant.update({
+      where: { id: membership.participant.id },
+      data: { userId: me.id },
+    });
+    await prisma.membership.update({
+      where: { id: membership.id },
+      data: { status: "ACCEPTED", acceptedAt: membership.acceptedAt ?? new Date() },
+    });
+    res.json({ ok: true, pilotId: membership.pilotId });
+  })
+);
+
+const joinSchema = z.object({ token: z.string().min(1) });
+
+// POST /my/join — enroll me via a company's shareable self-enroll link.
+participantRouter.post(
+  "/join",
+  asyncHandler(async (req, res) => {
+    const { token } = joinSchema.parse(req.body);
+    const me = await currentUser(req.user!.sub);
+    const pc = await prisma.pilotCompany.findUnique({
+      where: { shareToken: token },
+      include: { company: true, pilot: true },
+    });
+    if (!pc) throw new HttpError(404, "This link is not valid");
+
+    const participant = await prisma.participant.upsert({
+      where: { companyId_email: { companyId: pc.companyId, email: me.email } },
+      create: { companyId: pc.companyId, email: me.email, name: me.name, userId: me.id },
+      update: { userId: me.id },
+    });
+    const existing = await prisma.membership.findUnique({
+      where: { pilotId_participantId: { pilotId: pc.pilotId, participantId: participant.id } },
+    });
+    if (!existing) {
+      await prisma.membership.create({
+        data: {
+          pilotId: pc.pilotId,
+          participantId: participant.id,
+          inviteToken: randomBytes(24).toString("hex"),
+          status: "ACCEPTED",
+          acceptedAt: new Date(),
+        },
+      });
+    } else if (existing.status !== "ACCEPTED") {
+      await prisma.membership.update({
+        where: { id: existing.id },
+        data: { status: "ACCEPTED", acceptedAt: new Date() },
+      });
+    }
+    res.json({ ok: true, pilot: { id: pc.pilot.id, name: pc.pilot.name } });
+  })
+);
+
+// GET /my/admin-claims — company-admin seats offered to my email but not yet claimed.
+participantRouter.get(
+  "/admin-claims",
+  asyncHandler(async (req, res) => {
+    const me = await currentUser(req.user!.sub);
+    const companies = await prisma.company.findMany({
+      where: { adminEmail: me.email, adminUserId: null },
+      select: { id: true, name: true },
+    });
+    res.json({ claims: companies });
+  })
+);
+
+// POST /my/admin-claims/:companyId/accept — claim an offered admin seat. Becoming a
+// company admin bumps a plain tester to COMPANY_ADMIN, so we re-issue their token.
+participantRouter.post(
+  "/admin-claims/:companyId/accept",
+  asyncHandler(async (req, res) => {
+    const me = await currentUser(req.user!.sub);
+    const company = await prisma.company.findUnique({ where: { id: req.params.companyId } });
+    if (!company) throw new HttpError(404, "Company not found");
+    if (company.adminEmail.toLowerCase() !== me.email.toLowerCase()) {
+      throw new HttpError(403, "This admin seat was offered to a different email address");
+    }
+    if (company.adminUserId && company.adminUserId !== me.id) {
+      throw new HttpError(409, "This company already has an admin");
+    }
+
+    await prisma.company.update({ where: { id: company.id }, data: { adminUserId: me.id } });
+    // Keep a PM a PM (that would strip their powers); only promote plain testers.
+    const user =
+      me.role === "PARTICIPANT"
+        ? await prisma.user.update({ where: { id: me.id }, data: { role: "COMPANY_ADMIN" } })
+        : me;
+
+    const token = signToken({ sub: user.id, role: user.role, email: user.email });
+    res.json({
+      token,
+      user: { id: user.id, email: user.email, name: user.name, role: user.role },
+    });
   })
 );
