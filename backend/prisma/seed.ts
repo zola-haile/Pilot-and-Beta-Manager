@@ -196,8 +196,29 @@ async function main() {
   const features = await Promise.all(
     featureNames.map((name) => prisma.feature.create({ data: { applicationId: app.id, name } }))
   );
-  await prisma.feature.create({ data: { applicationId: app2.id, name: "Mobile navigation" } });
+  const mobileNav = await prisma.feature.create({
+    data: { applicationId: app2.id, name: "Mobile navigation" },
+  });
   await prisma.feature.create({ data: { applicationId: app2.id, name: "Push notifications" } });
+
+  // Beta v2 tests all CheckoutApp features (the default). Add a feature-scoped
+  // question so participants see a "Checkout button" section.
+  await prisma.question.create({
+    data: {
+      pilotId: beta.id,
+      featureId: features[0].id, // Checkout button
+      label: "Rate the checkout button",
+      type: "RATING",
+      options: { min: 1, max: 5 },
+      order: 2,
+    },
+  });
+
+  // Mobile Closed Beta only tests a subset (Mobile navigation).
+  await prisma.pilot.update({ where: { id: mobileBeta.id }, data: { allFeatures: false } });
+  await prisma.pilotFeature.create({
+    data: { pilotId: mobileBeta.id, featureId: mobileNav.id },
+  });
 
   // --- A feedback theme + sample comments in Beta v2, already triaged ---
   const mobileTheme = await prisma.theme.create({

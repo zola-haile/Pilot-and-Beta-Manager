@@ -21,6 +21,12 @@ interface Question {
   options: any;
   required: boolean;
   order: number;
+  featureId: string | null;
+}
+interface PilotFeature {
+  id: string;
+  name: string;
+  description: string | null;
 }
 interface Participant {
   id: string;
@@ -55,6 +61,8 @@ interface PilotDetail {
   startDate: string | null;
   endDate: string | null;
   status: string;
+  allFeatures: boolean;
+  features: PilotFeature[];
   questions: Question[];
   companies: PilotCompanyRow[];
   participants: Participant[];
@@ -128,7 +136,19 @@ export function PilotDetailPage() {
       </p>
 
       <div className="stack" style={{ marginTop: 24 }}>
-        <QuestionsSection pilotId={pilot.id} questions={pilot.questions} onChange={load} />
+        <PilotFeaturesSection
+          pilotId={pilot.id}
+          applicationId={pilot.applicationId}
+          allFeatures={pilot.allFeatures}
+          features={pilot.features}
+          onChange={load}
+        />
+        <QuestionsSection
+          pilotId={pilot.id}
+          questions={pilot.questions}
+          features={pilot.features}
+          onChange={load}
+        />
         <CompaniesInPilotSection pilotId={pilot.id} companies={pilot.companies} onChange={load} />
         <ParticipantsSection pilotId={pilot.id} participants={pilot.participants} onChange={load} />
         <ResponsesSection pilotId={pilot.id} questions={pilot.questions} responses={responses} onChange={load} />
@@ -164,10 +184,12 @@ function formatRange(start: string | null, end: string | null): string {
 function QuestionsSection({
   pilotId,
   questions,
+  features,
   onChange,
 }: {
   pilotId: string;
   questions: Question[];
+  features: PilotFeature[];
   onChange: () => void;
 }) {
   const [label, setLabel] = useState("");
@@ -175,6 +197,7 @@ function QuestionsSection({
   const [type, setType] = useState("TEXT");
   const [required, setRequired] = useState(false);
   const [choices, setChoices] = useState("");
+  const [featureId, setFeatureId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -191,13 +214,14 @@ function QuestionsSection({
           : undefined;
       await api(`/pilots/${pilotId}/questions`, {
         method: "POST",
-        body: { label, helpText: helpText || null, type, required, options },
+        body: { label, helpText: helpText || null, type, required, options, featureId: featureId || null },
       });
       setLabel("");
       setHelpText("");
       setChoices("");
       setRequired(false);
       setType("TEXT");
+      // keep featureId so adding several questions to one feature is quick
       onChange();
     } catch (err: any) {
       setError(err.message);
@@ -212,32 +236,70 @@ function QuestionsSection({
     onChange();
   }
 
+  async function reassign(qid: string, fid: string) {
+    await api(`/pilots/${pilotId}/questions/${qid}`, { method: "PATCH", body: { featureId: fid || null } });
+    onChange();
+  }
+
+  // Group questions: general first, then one group per feature (in features order).
+  const groups: { key: string; title: string; items: Question[] }[] = [];
+  const general = questions.filter((q) => !q.featureId);
+  if (general.length) groups.push({ key: "__general__", title: "General", items: general });
+  for (const f of features) {
+    const items = questions.filter((q) => q.featureId === f.id);
+    if (items.length) groups.push({ key: f.id, title: `🧩 ${f.name}`, items });
+  }
+
+  const renderItem = (q: Question) => (
+    <div key={q.id} className="list-item">
+      <div style={{ minWidth: 0 }}>
+        <b>{q.label}</b> {q.required && <span style={{ color: "var(--danger)" }}>*</span>}
+        <div className="muted" style={{ fontSize: 13 }}>
+          {typeLabel(q.type)}
+          {q.helpText ? ` · ${q.helpText}` : ""}
+          {q.type === "SELECT" && q.options?.choices ? ` · ${q.options.choices.join(", ")}` : ""}
+        </div>
+      </div>
+      <div className="row">
+        {features.length > 0 && (
+          <select
+            className="btn-sm"
+            value={q.featureId ?? ""}
+            onChange={(e) => reassign(q.id, e.target.value)}
+            style={{ width: "auto", padding: "5px 8px", fontSize: 13 }}
+            title="Which feature this question is about"
+          >
+            <option value="">General</option>
+            {features.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.name}
+              </option>
+            ))}
+          </select>
+        )}
+        <button className="btn-danger btn-sm" onClick={() => remove(q.id)}>
+          Remove
+        </button>
+      </div>
+    </div>
+  );
+
   return (
     <div className="card">
       <h2>Questions & fields</h2>
       <p className="muted" style={{ marginTop: 0 }}>
-        These are what participants see and fill in.
+        These are what participants see and fill in. Attach a question to a feature, or leave it general.
       </p>
       {questions.length === 0 ? (
         <p className="muted">No questions yet — add one below.</p>
       ) : (
-        <div>
-          {questions.map((q) => (
-            <div key={q.id} className="list-item">
-              <div>
-                <b>{q.label}</b>{" "}
-                {q.required && <span style={{ color: "var(--danger)" }}>*</span>}
-                <div className="muted" style={{ fontSize: 13 }}>
-                  {typeLabel(q.type)}
-                  {q.helpText ? ` · ${q.helpText}` : ""}
-                  {q.type === "SELECT" && q.options?.choices
-                    ? ` · ${q.options.choices.join(", ")}`
-                    : ""}
-                </div>
+        <div className="stack" style={{ gap: 16 }}>
+          {groups.map((g) => (
+            <div key={g.key}>
+              <div className="muted" style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 2 }}>
+                {g.title}
               </div>
-              <button className="btn-danger btn-sm" onClick={() => remove(q.id)}>
-                Remove
-              </button>
+              {g.items.map(renderItem)}
             </div>
           ))}
         </div>
@@ -260,11 +322,22 @@ function QuestionsSection({
               ))}
             </select>
           </label>
-          <label className="field" style={{ flex: 2 }}>
-            <span>Help text (optional)</span>
-            <input value={helpText} onChange={(e) => setHelpText(e.target.value)} />
+          <label className="field" style={{ flex: 1 }}>
+            <span>Feature</span>
+            <select value={featureId} onChange={(e) => setFeatureId(e.target.value)} disabled={features.length === 0}>
+              <option value="">General (whole pilot)</option>
+              {features.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.name}
+                </option>
+              ))}
+            </select>
           </label>
         </div>
+        <label className="field">
+          <span>Help text (optional)</span>
+          <input value={helpText} onChange={(e) => setHelpText(e.target.value)} />
+        </label>
         {type === "SELECT" && (
           <label className="field">
             <span>Choices (comma-separated)</span>
@@ -281,6 +354,141 @@ function QuestionsSection({
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+/* --------------------------- Piloted features -------------------------- */
+
+interface AppFeature {
+  id: string;
+  name: string;
+  description: string | null;
+  commentCount: number;
+}
+
+function PilotFeaturesSection({
+  pilotId,
+  applicationId,
+  allFeatures,
+  features,
+  onChange,
+}: {
+  pilotId: string;
+  applicationId: string;
+  allFeatures: boolean;
+  features: PilotFeature[];
+  onChange: () => void;
+}) {
+  const [appFeatures, setAppFeatures] = useState<AppFeature[]>([]);
+  const [editing, setEditing] = useState(false);
+  const [all, setAll] = useState(allFeatures);
+  const [selected, setSelected] = useState<Set<string>>(new Set(features.map((f) => f.id)));
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function openEditor() {
+    setError(null);
+    try {
+      const r = await api<{ features: AppFeature[] }>(`/applications/${applicationId}/features`);
+      setAppFeatures(r.features);
+      setAll(allFeatures);
+      setSelected(new Set(features.map((f) => f.id)));
+      setEditing(true);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  }
+
+  function toggle(id: string) {
+    setSelected((prev) => {
+      const n = new Set(prev);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
+  }
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/pilots/${pilotId}/features`, {
+        method: "PUT",
+        body: { allFeatures: all, featureIds: all ? [] : [...selected] },
+      });
+      setEditing(false);
+      onChange();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <div className="spread">
+        <h2 style={{ margin: 0 }}>Features being piloted</h2>
+        {!editing && (
+          <button className="btn-ghost btn-sm" onClick={openEditor}>
+            Edit
+          </button>
+        )}
+      </div>
+      <p className="muted" style={{ marginTop: 4 }}>
+        {allFeatures
+          ? "Testing all of the application's features (new ones are added automatically)."
+          : "Testing a selected subset of features."}
+      </p>
+      {error && <div className="alert alert-error">{error}</div>}
+
+      {!editing ? (
+        features.length === 0 ? (
+          <p className="muted">
+            No features yet — add some on the{" "}
+            <Link to={`/applications/${applicationId}`}>application page</Link>.
+          </p>
+        ) : (
+          <div className="chip-row">
+            {features.map((f) => (
+              <span key={f.id} className="chip">
+                🧩 {f.name}
+              </span>
+            ))}
+          </div>
+        )
+      ) : (
+        <div>
+          <label className="inline-check" style={{ marginBottom: 12 }}>
+            <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} />
+            <span>Test all features (including ones added later)</span>
+          </label>
+          {!all && (
+            <div className="stack" style={{ gap: 6, marginBottom: 12 }}>
+              {appFeatures.length === 0 ? (
+                <p className="muted" style={{ fontSize: 13 }}>
+                  This application has no features yet.
+                </p>
+              ) : (
+                appFeatures.map((f) => (
+                  <label key={f.id} className="inline-check">
+                    <input type="checkbox" checked={selected.has(f.id)} onChange={() => toggle(f.id)} />
+                    <span>{f.name}</span>
+                  </label>
+                ))
+              )}
+            </div>
+          )}
+          <div className="row">
+            <button onClick={save} disabled={busy}>
+              {busy ? "Saving…" : "Save"}
+            </button>
+            <button className="btn-ghost" onClick={() => setEditing(false)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

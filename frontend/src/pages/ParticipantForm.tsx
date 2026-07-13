@@ -12,6 +12,7 @@ interface Question {
   type: string;
   options: any;
   required: boolean;
+  featureId: string | null;
 }
 interface PilotView {
   id: string;
@@ -142,13 +143,22 @@ export function ParticipantFormPage() {
         {pilot.questions.length === 0 ? (
           <p className="muted">The organizer hasn't added any questions yet.</p>
         ) : (
-          pilot.questions.map((q) => (
-            <QuestionField
-              key={q.id}
-              question={q}
-              value={answers[q.id] ?? ""}
-              onChange={(v) => setAnswer(q.id, v)}
-            />
+          groupQuestions(pilot.questions, features).map((g) => (
+            <div key={g.key} style={{ marginBottom: 8 }}>
+              {g.title && (
+                <div className="feature-heading">
+                  🧩 {g.title}
+                </div>
+              )}
+              {g.items.map((q) => (
+                <QuestionField
+                  key={q.id}
+                  question={q}
+                  value={answers[q.id] ?? ""}
+                  onChange={(v) => setAnswer(q.id, v)}
+                />
+              ))}
+            </div>
           ))
         )}
         {pilot.questions.length > 0 && (
@@ -207,6 +217,25 @@ interface CommentItem {
   createdAt: string;
   features: FeatureRef[];
   images: CommentImage[];
+}
+
+// General questions first, then a section per feature (in the pilot's order).
+function groupQuestions(
+  questions: Question[],
+  features: FeatureRef[]
+): { key: string; title: string | null; items: Question[] }[] {
+  const groups: { key: string; title: string | null; items: Question[] }[] = [];
+  const general = questions.filter((q) => !q.featureId);
+  if (general.length) groups.push({ key: "__general__", title: null, items: general });
+  for (const f of features) {
+    const items = questions.filter((q) => q.featureId === f.id);
+    if (items.length) groups.push({ key: f.id, title: f.name, items });
+  }
+  // Any question whose feature isn't in the piloted list falls back to a group.
+  const known = new Set(features.map((f) => f.id));
+  const orphan = questions.filter((q) => q.featureId && !known.has(q.featureId));
+  if (orphan.length) groups.push({ key: "__orphan__", title: null, items: orphan });
+  return groups;
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {

@@ -16,8 +16,8 @@ PM
  ├─ Application  (a product being piloted — a PM owns many)
  │    ├─ Feature (a taggable part of the app; PM-managed)
  │    ├─ Theme   (a cross-pilot insight the PM groups comments under)
- │    └─ Pilot
- │         ├─ Question (typed fields)
+ │    └─ Pilot   (tests all features, or an explicit subset via PilotFeature)
+ │         ├─ Question (typed fields; optionally scoped to one Feature)
  │         ├─ PilotCompany (a company added to this pilot; carries a share link)
  │         ├─ Submission → Answer (a participant's dated entry; many over time)
  │         └─ Comment  (flexible feedback: body + category + features + images)
@@ -141,6 +141,7 @@ participant flow.
 | GET/POST | `/applications/:appId/pilots` | PM | List / create pilots in an application |
 | GET/POST | `/applications/:appId/features` | PM | List / add app features |
 | PATCH/DELETE | `/features/:id` | PM | Edit / delete a feature |
+| PUT | `/pilots/:id/features` | PM | Set which features a pilot tests (all or a subset) |
 | GET/POST | `/applications/:appId/themes` | PM | List / add feedback themes |
 | PATCH/DELETE | `/themes/:id` | PM | Rename / delete a theme |
 | GET/PATCH/DELETE | `/pilots/:id/comments[/:cid]` | PM | View / triage / delete pilot comments |

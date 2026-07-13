@@ -7,6 +7,7 @@ import { pilotStatus } from "../lib/pilotStatus";
 import { CommentCategory } from "@prisma/client";
 import { COMMENT_CATEGORIES, CATEGORY_VALUES } from "../lib/comments";
 import { saveDataUrlImage } from "../lib/uploads";
+import { pilotedFeatures, pilotedFeatureIds } from "../lib/pilotFeatures";
 
 export const participantRouter = Router();
 
@@ -71,10 +72,10 @@ participantRouter.get(
       where: { id: req.params.id },
       include: {
         questions: { orderBy: { order: "asc" } },
-        application: { include: { features: { orderBy: { name: "asc" } } } },
       },
     });
     if (!pilot) throw new HttpError(404, "Pilot not found");
+    const features = await pilotedFeatures(pilot);
 
     const draft = await prisma.submission.findFirst({
       where: { pilotId: pilot.id, userId: req.user!.sub, submittedAt: null },
@@ -94,8 +95,8 @@ participantRouter.get(
         status: pilotStatus(pilot.startDate, pilot.endDate),
         questions: pilot.questions,
       },
-      // Everything the comment composer needs:
-      features: pilot.application.features.map((f) => ({ id: f.id, name: f.name })),
+      // Only the features this pilot is testing (drives grouping + the composer).
+      features: features.map((f) => ({ id: f.id, name: f.name })),
       commentCategories: COMMENT_CATEGORIES,
       draft: { answers: draft ? answersToMap(draft.answers) : {} },
       history: history.map((h) => ({
@@ -225,18 +226,15 @@ participantRouter.post(
 
     const pilot = await prisma.pilot.findUnique({
       where: { id: req.params.id },
-      select: { applicationId: true },
+      select: { id: true, applicationId: true, allFeatures: true },
     });
     if (!pilot) throw new HttpError(404, "Pilot not found");
 
-    // Only allow features belonging to this pilot's application.
+    // Only allow features this pilot is actually testing.
     let validFeatureIds: string[] = [];
     if (featureIds.length > 0) {
-      const features = await prisma.feature.findMany({
-        where: { id: { in: featureIds }, applicationId: pilot.applicationId },
-        select: { id: true },
-      });
-      validFeatureIds = features.map((f) => f.id);
+      const piloted = await pilotedFeatureIds(pilot);
+      validFeatureIds = featureIds.filter((id) => piloted.has(id));
     }
 
     // Persist images to disk first (throws on invalid data).

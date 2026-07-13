@@ -385,6 +385,9 @@ const createPilotSchema = z.object({
   description: z.string().optional().nullable(),
   startDate: z.string().datetime().optional().nullable(),
   endDate: z.string().datetime().optional().nullable(),
+  // Feature scope: test all features (default), or an explicit subset.
+  allFeatures: z.boolean().optional().default(true),
+  featureIds: z.array(z.string()).optional().default([]),
 });
 
 // POST /applications/:appId/pilots — create a pilot in the application.
@@ -394,6 +397,17 @@ applicationRouter.post(
   asyncHandler(async (req, res) => {
     const app = await getOwnedApplication(req.params.appId, req.user!.sub);
     const data = createPilotSchema.parse(req.body);
+
+    // When a subset is chosen, keep only features that belong to this app.
+    let validFeatureIds: string[] = [];
+    if (!data.allFeatures && data.featureIds.length > 0) {
+      const feats = await prisma.feature.findMany({
+        where: { id: { in: data.featureIds }, applicationId: app.id },
+        select: { id: true },
+      });
+      validFeatureIds = feats.map((f) => f.id);
+    }
+
     const pilot = await prisma.pilot.create({
       data: {
         applicationId: app.id,
@@ -401,6 +415,10 @@ applicationRouter.post(
         description: data.description ?? null,
         startDate: data.startDate ? new Date(data.startDate) : null,
         endDate: data.endDate ? new Date(data.endDate) : null,
+        allFeatures: data.allFeatures,
+        ...(data.allFeatures
+          ? {}
+          : { pilotFeatures: { create: validFeatureIds.map((featureId) => ({ featureId })) } }),
       },
     });
     res.status(201).json({ pilot: { ...pilot, status: pilotStatus(pilot.startDate, pilot.endDate) } });

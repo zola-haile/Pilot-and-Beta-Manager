@@ -15,6 +15,7 @@ import {
 } from "../lib/comments";
 import { CommentStatus, CommentPriority } from "@prisma/client";
 import { commentAnalytics, questionRollups, sentimentScore } from "../lib/analytics";
+import { pilotedFeatures, pilotedFeatureIds } from "../lib/pilotFeatures";
 
 const OPEN_STATUSES = ["NEW", "TRIAGED", "PLANNED", "IN_PROGRESS"];
 
@@ -104,6 +105,8 @@ pilotsRouter.get(
       perCompany.set(cid, (perCompany.get(cid) ?? 0) + 1);
     }
 
+    const features = await pilotedFeatures(pilot);
+
     res.json({
       pilot: {
         id: pilot.id,
@@ -114,6 +117,8 @@ pilotsRouter.get(
         endDate: pilot.endDate,
         createdAt: pilot.createdAt,
         status: pilotStatus(pilot.startDate, pilot.endDate),
+        allFeatures: pilot.allFeatures,
+        features: features.map((f) => ({ id: f.id, name: f.name, description: f.description })),
         questions: pilot.questions,
         companies: pilot.pilotCompanies.map((pc) => ({
           id: pc.id,
@@ -173,6 +178,64 @@ pilotsRouter.delete(
   })
 );
 
+/* --------------------------- Piloted features -------------------------- */
+
+const setFeaturesSchema = z.object({
+  allFeatures: z.boolean(),
+  featureIds: z.array(z.string()).optional().default([]),
+});
+
+// PUT /pilots/:id/features — set which of the app's features this pilot tests.
+// Questions tied to a feature that's dropped fall back to "general".
+pilotsRouter.put(
+  "/:id/features",
+  asyncHandler(async (req, res) => {
+    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const { allFeatures, featureIds } = setFeaturesSchema.parse(req.body);
+
+    // Resolve the effective set of feature ids after this change.
+    let effectiveIds: string[];
+    if (allFeatures) {
+      const all = await prisma.feature.findMany({
+        where: { applicationId: pilot.applicationId },
+        select: { id: true },
+      });
+      effectiveIds = all.map((f) => f.id);
+    } else {
+      const valid = await prisma.feature.findMany({
+        where: { id: { in: featureIds }, applicationId: pilot.applicationId },
+        select: { id: true },
+      });
+      effectiveIds = valid.map((f) => f.id);
+    }
+
+    await prisma.$transaction([
+      prisma.pilot.update({ where: { id: pilot.id }, data: { allFeatures } }),
+      prisma.pilotFeature.deleteMany({ where: { pilotId: pilot.id } }),
+      ...(allFeatures
+        ? []
+        : [
+            prisma.pilotFeature.createMany({
+              data: effectiveIds.map((featureId) => ({ pilotId: pilot.id, featureId })),
+            }),
+          ]),
+      // Detach questions pointing at a feature this pilot no longer tests.
+      prisma.question.updateMany({
+        where: effectiveIds.length
+          ? { pilotId: pilot.id, featureId: { notIn: effectiveIds } }
+          : { pilotId: pilot.id, featureId: { not: null } },
+        data: { featureId: null },
+      }),
+    ]);
+
+    const features = await pilotedFeatures({ ...pilot, allFeatures });
+    res.json({
+      allFeatures,
+      features: features.map((f) => ({ id: f.id, name: f.name, description: f.description })),
+    });
+  })
+);
+
 /* ----------------------------- Questions ----------------------------- */
 
 const questionSchema = z.object({
@@ -182,14 +245,28 @@ const questionSchema = z.object({
   options: z.any().optional(),
   required: z.boolean().optional(),
   order: z.number().int().optional(),
+  featureId: z.string().nullable().optional(), // null/absent = a general question
 });
+
+/** Throws unless the featureId (when set) is among the pilot's tested features. */
+async function assertFeaturePiloted(
+  pilot: { id: string; applicationId: string; allFeatures: boolean },
+  featureId: string | null | undefined
+) {
+  if (!featureId) return;
+  const ids = await pilotedFeatureIds(pilot);
+  if (!ids.has(featureId)) {
+    throw new HttpError(400, "That feature isn't being tested in this pilot");
+  }
+}
 
 // POST /pilots/:id/questions — add a question.
 pilotsRouter.post(
   "/:id/questions",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
     const data = questionSchema.parse(req.body);
+    await assertFeaturePiloted(pilot, data.featureId);
     const max = await prisma.question.aggregate({
       where: { pilotId: req.params.id },
       _max: { order: true },
@@ -197,6 +274,7 @@ pilotsRouter.post(
     const question = await prisma.question.create({
       data: {
         pilotId: req.params.id,
+        featureId: data.featureId ?? null,
         label: data.label,
         helpText: data.helpText ?? null,
         type: data.type,
@@ -213,12 +291,13 @@ pilotsRouter.post(
 pilotsRouter.patch(
   "/:id/questions/:qid",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
     const data = questionSchema.partial().parse(req.body);
     const existing = await prisma.question.findUnique({ where: { id: req.params.qid } });
     if (!existing || existing.pilotId !== req.params.id) {
       throw new HttpError(404, "Question not found");
     }
+    if (data.featureId !== undefined) await assertFeaturePiloted(pilot, data.featureId);
     const question = await prisma.question.update({
       where: { id: req.params.qid },
       data: {
@@ -228,6 +307,7 @@ pilotsRouter.patch(
         ...(data.options !== undefined ? { options: data.options ?? undefined } : {}),
         ...(data.required !== undefined ? { required: data.required } : {}),
         ...(data.order !== undefined ? { order: data.order } : {}),
+        ...(data.featureId !== undefined ? { featureId: data.featureId } : {}),
       },
     });
     res.json({ question });

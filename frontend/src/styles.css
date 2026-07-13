@@ -706,3 +706,13 @@ button.chip-select {
   min-width: 34px;
   font-variant-numeric: tabular-nums;
 }
+
+/* Feature section heading (question grouping) */
+.feature-heading {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--primary);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+  margin: 6px 0 12px;
+}

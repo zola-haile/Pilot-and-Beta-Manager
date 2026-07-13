@@ -506,8 +506,25 @@ function NewPilotForm({ appId, onCreated }: { appId: string; onCreated: () => vo
   const [description, setDescription] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [appFeatures, setAppFeatures] = useState<Feature[]>([]);
+  const [allFeatures, setAllFeatures] = useState(true);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api<{ features: Feature[] }>(`/applications/${appId}/features`)
+      .then((r) => setAppFeatures(r.features))
+      .catch(() => {});
+  }, [appId]);
+
+  function toggle(id: string) {
+    setSelected((prev) => {
+      const n = new Set(prev);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -521,6 +538,8 @@ function NewPilotForm({ appId, onCreated }: { appId: string; onCreated: () => vo
           description: description || null,
           startDate: startDate ? new Date(startDate).toISOString() : null,
           endDate: endDate ? new Date(endDate).toISOString() : null,
+          allFeatures,
+          featureIds: allFeatures ? [] : [...selected],
         },
       });
       onCreated();
@@ -552,6 +571,28 @@ function NewPilotForm({ appId, onCreated }: { appId: string; onCreated: () => vo
           <span>End date</span>
           <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
         </label>
+      </div>
+      <div className="field">
+        <span>Features to pilot</span>
+        <label className="inline-check" style={{ marginBottom: 8 }}>
+          <input type="checkbox" checked={allFeatures} onChange={(e) => setAllFeatures(e.target.checked)} />
+          <span>All features {appFeatures.length > 0 ? `(${appFeatures.length})` : ""}</span>
+        </label>
+        {!allFeatures &&
+          (appFeatures.length === 0 ? (
+            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+              No features yet — add some on the application page first.
+            </p>
+          ) : (
+            <div className="stack" style={{ gap: 6 }}>
+              {appFeatures.map((f) => (
+                <label key={f.id} className="inline-check">
+                  <input type="checkbox" checked={selected.has(f.id)} onChange={() => toggle(f.id)} />
+                  <span>{f.name}</span>
+                </label>
+              ))}
+            </div>
+          ))}
       </div>
       <button type="submit" disabled={busy}>{busy ? "Creating…" : "Create pilot"}</button>
     </form>

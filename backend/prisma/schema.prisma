@@ -118,12 +118,27 @@ model Pilot {
   startDate     DateTime?
   endDate       DateTime?
   createdAt     DateTime    @default(now())
+  // When true the pilot tests every feature of its application (incl. ones
+  // added later). When false, the explicit pilotFeatures set applies.
+  allFeatures   Boolean     @default(true)
 
   questions      Question[]
   memberships    Membership[]
   submissions    Submission[]
   pilotCompanies PilotCompany[]
   comments       Comment[]
+  pilotFeatures  PilotFeature[]
+}
+
+// Which application features a pilot is testing (used when allFeatures = false).
+model PilotFeature {
+  id        String  @id @default(cuid())
+  pilotId   String
+  pilot     Pilot   @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  featureId String
+  feature   Feature @relation(fields: [featureId], references: [id], onDelete: Cascade)
+
+  @@unique([pilotId, featureId])
 }
 
 // A company added into a pilot by the PM. Emailing this triggers the company's
@@ -144,6 +159,9 @@ model Question {
   id       String       @id @default(cuid())
   pilotId  String
   pilot    Pilot        @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  // Optionally scoped to one of the pilot's features (null = a general question).
+  featureId String?
+  feature   Feature?    @relation(fields: [featureId], references: [id], onDelete: SetNull)
   label    String
   helpText String?
   type     QuestionType @default(TEXT)
@@ -208,7 +226,9 @@ model Feature {
   description   String?
   createdAt     DateTime    @default(now())
 
-  comments Comment[]
+  comments      Comment[]
+  questions     Question[]
+  pilotFeatures PilotFeature[]
 
   @@unique([applicationId, name])
 }
