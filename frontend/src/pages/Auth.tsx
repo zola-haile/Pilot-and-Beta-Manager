@@ -1,6 +1,6 @@
-import { FormEvent, useState } from "react";
-import { Link, Navigate, useNavigate } from "react-router-dom";
-import { api } from "../api";
+import { FormEvent, useEffect, useState } from "react";
+import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
+import { api, ApiError } from "../api";
 import { useAuth, User } from "../auth";
 
 function AuthShell({ title, children }: { title: string; children: React.ReactNode }) {
@@ -23,6 +23,8 @@ export function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [unverified, setUnverified] = useState(false);
+  const [resent, setResent] = useState(false);
   const [busy, setBusy] = useState(false);
 
   if (user) return <Navigate to="/" replace />;
@@ -30,6 +32,8 @@ export function LoginPage() {
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+    setUnverified(false);
+    setResent(false);
     setBusy(true);
     try {
       const res = await api<{ token: string; user: User }>("/auth/login", {
@@ -40,6 +44,22 @@ export function LoginPage() {
       login(res.token, res.user);
       navigate("/");
     } catch (err: any) {
+      if (err instanceof ApiError && err.code === "EMAIL_UNVERIFIED") {
+        setUnverified(true);
+      } else {
+        setError(err.message);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resend() {
+    setBusy(true);
+    try {
+      await api("/auth/resend-verification", { method: "POST", auth: false, body: { email } });
+      setResent(true);
+    } catch (err: any) {
       setError(err.message);
     } finally {
       setBusy(false);
@@ -49,6 +69,17 @@ export function LoginPage() {
   return (
     <AuthShell title="Sign in to your account">
       {error && <div className="alert alert-error">{error}</div>}
+      {unverified && (
+        <div className="alert alert-info">
+          Please verify your email before signing in. {resent ? (
+            <b>Sent — check your inbox.</b>
+          ) : (
+            <button type="button" className="linkish" disabled={busy} onClick={resend}>
+              Resend the link
+            </button>
+          )}
+        </div>
+      )}
       <form onSubmit={submit}>
         <label className="field">
           <span>Email</span>
@@ -70,14 +101,14 @@ export function LoginPage() {
 }
 
 export function RegisterPage() {
-  const { user, login } = useAuth();
-  const navigate = useNavigate();
+  const { user } = useAuth();
   const [role, setRole] = useState<"PM" | "PARTICIPANT">("PM");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState(false);
 
   if (user) return <Navigate to="/" replace />;
 
@@ -86,18 +117,31 @@ export function RegisterPage() {
     setError(null);
     setBusy(true);
     try {
-      const res = await api<{ token: string; user: User }>("/auth/register", {
+      await api("/auth/register", {
         method: "POST",
         auth: false,
         body: { name, email, password, role },
       });
-      login(res.token, res.user);
-      navigate("/");
+      setSent(true);
     } catch (err: any) {
       setError(err.message);
     } finally {
       setBusy(false);
     }
+  }
+
+  if (sent) {
+    return (
+      <AuthShell title="Almost there">
+        <div className="alert alert-success">
+          If <b>{email}</b> is available, we've sent a confirmation link to it. Click the
+          link in that email to activate your account and sign in.
+        </div>
+        <p className="muted" style={{ marginBottom: 0, marginTop: 18, textAlign: "center" }}>
+          <Link to="/login">Back to sign in</Link>
+        </p>
+      </AuthShell>
+    );
   }
 
   return (
@@ -151,6 +195,43 @@ export function RegisterPage() {
       <p className="muted" style={{ marginBottom: 0, marginTop: 18, textAlign: "center" }}>
         Already have an account? <Link to="/login">Sign in</Link>
       </p>
+    </AuthShell>
+  );
+}
+
+// Landing for the email-confirmation link: verifies the token and signs in.
+export function VerifyEmailPage() {
+  const { token } = useParams();
+  const { login } = useAuth();
+  const navigate = useNavigate();
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api<{ token: string; user: User }>(`/auth/verify/${token}`, { method: "POST", auth: false })
+      .then((res) => {
+        if (cancelled) return;
+        login(res.token, res.user);
+        navigate("/", { replace: true });
+      })
+      .catch((err) => !cancelled && setError(err.message));
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  return (
+    <AuthShell title="Confirming your email">
+      {error ? (
+        <>
+          <div className="alert alert-error">{error}</div>
+          <p className="muted" style={{ marginBottom: 0, textAlign: "center" }}>
+            <Link to="/login">Back to sign in</Link>
+          </p>
+        </>
+      ) : (
+        <p className="muted">One moment…</p>
+      )}
     </AuthShell>
   );
 }

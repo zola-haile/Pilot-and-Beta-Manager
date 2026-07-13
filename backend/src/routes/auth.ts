@@ -1,60 +1,133 @@
 import { Router } from "express";
+import { randomBytes } from "crypto";
 import { z } from "zod";
 import { prisma } from "../prisma";
-import { hashPassword, verifyPassword } from "../lib/password";
+import { hashPassword, verifyPassword, assertStrongPassword } from "../lib/password";
 import { signToken } from "../lib/jwt";
 import { asyncHandler, HttpError } from "../lib/http";
 import { authenticate } from "../middleware/auth";
+import { rateLimit } from "../middleware/rateLimit";
+import { sendEmail, verifyEmail } from "../lib/email";
+import { config } from "../config";
 
 export const authRouter = Router();
 
-function publicUser(u: {
+const appBase = () => config.appUrl.replace(/\/$/, "");
+const verifyUrl = (t: string) => `${appBase()}/verify/${t}`;
+
+// Personal pilot invites are single-use and expire; share links are long-lived.
+const INVITE_TTL_MS = 14 * 24 * 3600 * 1000;
+const VERIFY_TTL_MS = 24 * 3600 * 1000;
+
+type UserRecord = {
   id: string;
   email: string;
   name: string | null;
   role: "PM" | "COMPANY_ADMIN" | "PARTICIPANT";
-}) {
-  return { id: u.id, email: u.email, name: u.name, role: u.role };
+  tokenVersion: number;
+  emailVerifiedAt: Date | null;
+};
+
+function publicUser(u: UserRecord) {
+  return { id: u.id, email: u.email, name: u.name, role: u.role, emailVerified: u.emailVerifiedAt !== null };
 }
+
+function issueToken(u: UserRecord): string {
+  return signToken({ sub: u.id, role: u.role, email: u.email, tv: u.tokenVersion });
+}
+
+function freshVerifyToken() {
+  return { verifyToken: randomBytes(24).toString("hex"), verifyTokenExpiresAt: new Date(Date.now() + VERIFY_TTL_MS) };
+}
+
+async function sendVerification(email: string, token: string) {
+  await sendEmail(verifyEmail({ to: email, verifyUrl: verifyUrl(token) }));
+}
+
+/* ------------------------------ Register ------------------------------ */
 
 const registerSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8, "Password must be at least 8 characters"),
   name: z.string().min(1).optional(),
-  // PMs self-register to run pilots. Participants are created via invitations.
+  // PMs run pilots; participants test. Either way the email must be verified
+  // before it can act on email-scoped resources (invites, admin seats).
   role: z.enum(["PM", "PARTICIPANT"]).default("PM"),
 });
 
-// POST /auth/register — create a new account (defaults to PM).
+// POST /auth/register — create an account and email a verification link. Always
+// responds the same way whether or not the email is already taken, so it can't
+// be used to enumerate existing accounts.
 authRouter.post(
   "/register",
+  rateLimit({ windowMs: 60 * 60 * 1000, max: 10, message: "Too many sign-up attempts, try again later" }),
   asyncHandler(async (req, res) => {
     const { email, password, name, role } = registerSchema.parse(req.body);
-    const existing = await prisma.user.findUnique({ where: { email } });
-    if (existing) throw new HttpError(409, "An account with that email already exists");
+    assertStrongPassword(password, email);
 
-    const user = await prisma.user.create({
-      data: {
-        email,
-        name: name ?? null,
-        role,
-        passwordHash: await hashPassword(password),
-      },
-    });
-    // PMs create their own applications after registering (they can own many).
-    const token = signToken({ sub: user.id, role: user.role, email: user.email });
-    res.status(201).json({ token, user: publicUser(user) });
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (!existing) {
+      const { verifyToken, verifyTokenExpiresAt } = freshVerifyToken();
+      await prisma.user.create({
+        data: {
+          email,
+          name: name ?? null,
+          role,
+          passwordHash: await hashPassword(password),
+          verifyToken,
+          verifyTokenExpiresAt,
+        },
+      });
+      await sendVerification(email, verifyToken);
+    }
+    // Identical response either way (no account-existence disclosure).
+    res.status(202).json({ pending: true });
   })
 );
+
+// POST /auth/verify/:token — confirm an email address and sign in.
+authRouter.post(
+  "/verify/:token",
+  rateLimit({ windowMs: 15 * 60 * 1000, max: 30 }),
+  asyncHandler(async (req, res) => {
+    const user = await prisma.user.findUnique({ where: { verifyToken: req.params.token } });
+    if (!user || !user.verifyTokenExpiresAt || user.verifyTokenExpiresAt < new Date()) {
+      throw new HttpError(400, "This verification link is invalid or has expired");
+    }
+    const updated = await prisma.user.update({
+      where: { id: user.id },
+      data: { emailVerifiedAt: new Date(), verifyToken: null, verifyTokenExpiresAt: null },
+    });
+    res.json({ token: issueToken(updated), user: publicUser(updated) });
+  })
+);
+
+// POST /auth/resend-verification — re-send the link. Generic response.
+authRouter.post(
+  "/resend-verification",
+  rateLimit({ windowMs: 60 * 60 * 1000, max: 5 }),
+  asyncHandler(async (req, res) => {
+    const { email } = z.object({ email: z.string().email() }).parse(req.body);
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (user && !user.emailVerifiedAt) {
+      const { verifyToken, verifyTokenExpiresAt } = freshVerifyToken();
+      await prisma.user.update({ where: { id: user.id }, data: { verifyToken, verifyTokenExpiresAt } });
+      await sendVerification(email, verifyToken);
+    }
+    res.json({ ok: true });
+  })
+);
+
+/* -------------------------------- Login ------------------------------- */
 
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
 });
 
-// POST /auth/login
 authRouter.post(
   "/login",
+  rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: "Too many sign-in attempts, try again later" }),
   asyncHandler(async (req, res) => {
     const { email, password } = loginSchema.parse(req.body);
     const user = await prisma.user.findUnique({ where: { email } });
@@ -63,9 +136,10 @@ authRouter.post(
     }
     const ok = await verifyPassword(password, user.passwordHash);
     if (!ok) throw new HttpError(401, "Invalid email or password");
-
-    const token = signToken({ sub: user.id, role: user.role, email: user.email });
-    res.json({ token, user: publicUser(user) });
+    if (!user.emailVerifiedAt) {
+      throw new HttpError(403, "Please verify your email address before signing in", "EMAIL_UNVERIFIED");
+    }
+    res.json({ token: issueToken(user), user: publicUser(user) });
   })
 );
 
@@ -80,7 +154,10 @@ authRouter.get(
   })
 );
 
-// GET /auth/invitations/:token — preview an invite (who it's for, which pilot).
+/* ---------------------- Pilot invitations (by token) ------------------- */
+
+// GET /auth/invitations/:token — preview an invite. Requires the (secret) token;
+// returns only what the accept screen needs.
 authRouter.get(
   "/invitations/:token",
   asyncHandler(async (req, res) => {
@@ -92,19 +169,91 @@ authRouter.get(
       },
     });
     if (!membership) throw new HttpError(404, "Invitation not found");
+    if (membership.status !== "ACCEPTED" && membership.invitedAt.getTime() + INVITE_TTL_MS < Date.now()) {
+      throw new HttpError(410, "This invitation has expired — ask for a new one");
+    }
 
     const existingUser = await prisma.user.findUnique({
       where: { email: membership.participant.email },
     });
     res.json({
       email: membership.participant.email,
-      name: membership.participant.name,
       company: membership.participant.company.name,
       pilot: membership.pilot,
       status: membership.status,
-      // Tells the frontend whether to ask for a new password or just a login.
       accountExists: Boolean(existingUser?.passwordHash),
     });
+  })
+);
+
+const acceptSchema = z.object({
+  password: z.string().min(8, "Password must be at least 8 characters").optional(),
+  name: z.string().min(1).optional(),
+});
+
+// POST /auth/invitations/:token/accept — claim an invite. Creates/activates the
+// account (proving email ownership, so it's marked verified), links the
+// membership, and single-uses the token by rotating it.
+authRouter.post(
+  "/invitations/:token/accept",
+  asyncHandler(async (req, res) => {
+    const { password, name } = acceptSchema.parse(req.body);
+    const membership = await prisma.membership.findUnique({
+      where: { inviteToken: req.params.token },
+      include: { participant: true },
+    });
+    if (!membership) throw new HttpError(404, "Invitation not found");
+    if (membership.status !== "ACCEPTED" && membership.invitedAt.getTime() + INVITE_TTL_MS < Date.now()) {
+      throw new HttpError(410, "This invitation has expired — ask for a new one");
+    }
+    const participant = membership.participant;
+
+    let user = await prisma.user.findUnique({ where: { email: participant.email } });
+
+    if (!user) {
+      if (!password) throw new HttpError(400, "A password is required to create your account");
+      assertStrongPassword(password, participant.email);
+      user = await prisma.user.create({
+        data: {
+          email: participant.email,
+          name: name ?? participant.name,
+          role: "PARTICIPANT",
+          passwordHash: await hashPassword(password),
+          emailVerifiedAt: new Date(), // the invite proves they control this inbox
+        },
+      });
+    } else if (!user.passwordHash) {
+      if (!password) throw new HttpError(400, "A password is required to activate your account");
+      assertStrongPassword(password, participant.email);
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          passwordHash: await hashPassword(password),
+          name: name ?? user.name ?? participant.name,
+          emailVerifiedAt: user.emailVerifiedAt ?? new Date(),
+        },
+      });
+    } else if (!user.emailVerifiedAt) {
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { emailVerifiedAt: new Date() },
+      });
+    }
+
+    await prisma.participant.update({
+      where: { id: participant.id },
+      data: { userId: user.id },
+    });
+    await prisma.membership.update({
+      where: { id: membership.id },
+      data: {
+        status: "ACCEPTED",
+        acceptedAt: membership.acceptedAt ?? new Date(),
+        inviteToken: randomBytes(24).toString("hex"), // dead-link the used token
+      },
+    });
+
+    res.json({ token: issueToken(user), user: publicUser(user) });
   })
 );
 
@@ -146,86 +295,33 @@ authRouter.post(
     let user = await prisma.user.findUnique({ where: { email: company.adminEmail } });
     if (!user) {
       if (!password) throw new HttpError(400, "A password is required to create your account");
+      assertStrongPassword(password, company.adminEmail);
       user = await prisma.user.create({
         data: {
           email: company.adminEmail,
           name: name ?? null,
           role: "COMPANY_ADMIN",
           passwordHash: await hashPassword(password),
+          emailVerifiedAt: new Date(), // the emailed token proves inbox control
         },
       });
     } else if (!user.passwordHash) {
       if (!password) throw new HttpError(400, "A password is required to activate your account");
+      assertStrongPassword(password, company.adminEmail);
       user = await prisma.user.update({
         where: { id: user.id },
-        data: { passwordHash: await hashPassword(password), name: name ?? user.name },
+        data: {
+          passwordHash: await hashPassword(password),
+          name: name ?? user.name,
+          emailVerifiedAt: user.emailVerifiedAt ?? new Date(),
+        },
       });
+    } else if (!user.emailVerifiedAt) {
+      user = await prisma.user.update({ where: { id: user.id }, data: { emailVerifiedAt: new Date() } });
     }
 
     await prisma.company.update({ where: { id: company.id }, data: { adminUserId: user.id } });
 
-    const token = signToken({ sub: user.id, role: user.role, email: user.email });
-    res.json({ token, user: publicUser(user) });
-  })
-);
-
-const acceptSchema = z.object({
-  password: z.string().min(8, "Password must be at least 8 characters").optional(),
-  name: z.string().min(1).optional(),
-});
-
-// POST /auth/invitations/:token/accept — claim an invite.
-// Creates the participant account (setting a password) if needed, links the
-// membership to that user, and returns a login token.
-authRouter.post(
-  "/invitations/:token/accept",
-  asyncHandler(async (req, res) => {
-    const { password, name } = acceptSchema.parse(req.body);
-    const membership = await prisma.membership.findUnique({
-      where: { inviteToken: req.params.token },
-      include: { participant: true },
-    });
-    if (!membership) throw new HttpError(404, "Invitation not found");
-    const participant = membership.participant;
-
-    let user = await prisma.user.findUnique({ where: { email: participant.email } });
-
-    if (!user) {
-      if (!password) throw new HttpError(400, "A password is required to create your account");
-      user = await prisma.user.create({
-        data: {
-          email: participant.email,
-          name: name ?? participant.name,
-          role: "PARTICIPANT",
-          passwordHash: await hashPassword(password),
-        },
-      });
-    } else if (!user.passwordHash) {
-      // Account was pre-created but never activated.
-      if (!password) throw new HttpError(400, "A password is required to activate your account");
-      user = await prisma.user.update({
-        where: { id: user.id },
-        data: {
-          passwordHash: await hashPassword(password),
-          name: name ?? user.name ?? participant.name,
-        },
-      });
-    }
-
-    // Link the app-level participant to this user, and mark the invite accepted.
-    await prisma.participant.update({
-      where: { id: participant.id },
-      data: { userId: user.id },
-    });
-    await prisma.membership.update({
-      where: { id: membership.id },
-      data: {
-        status: "ACCEPTED",
-        acceptedAt: membership.acceptedAt ?? new Date(),
-      },
-    });
-
-    const token = signToken({ sub: user.id, role: user.role, email: user.email });
-    res.json({ token, user: publicUser(user) });
+    res.json({ token: issueToken(user), user: publicUser(user) });
   })
 );

@@ -3,12 +3,13 @@ import { randomBytes } from "crypto";
 import { z } from "zod";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
-import { authenticate } from "../middleware/auth";
+import { authenticate, requireVerified } from "../middleware/auth";
+import { rateLimit, byUser } from "../middleware/rateLimit";
 import { signToken } from "../lib/jwt";
 import { pilotStatus } from "../lib/pilotStatus";
 import { CommentCategory } from "@prisma/client";
 import { COMMENT_CATEGORIES, CATEGORY_VALUES } from "../lib/comments";
-import { saveDataUrlImage } from "../lib/uploads";
+import { saveDataUrlImage, signUploadPath } from "../lib/uploads";
 import { pilotedFeatures, pilotedFeatureIds } from "../lib/pilotFeatures";
 
 export const participantRouter = Router();
@@ -208,7 +209,7 @@ function serializeComment(c: {
     category: c.category,
     createdAt: c.createdAt,
     features: c.features.map((f) => ({ id: f.id, name: f.name })),
-    images: c.images.map((i) => ({ id: i.id, url: i.url })),
+    images: c.images.map((i) => ({ id: i.id, url: signUploadPath(i.url) })),
   };
 }
 
@@ -222,6 +223,7 @@ const createCommentSchema = z.object({
 // POST /my/pilots/:id/comments — leave a flexible comment on the pilot.
 participantRouter.post(
   "/pilots/:id/comments",
+  rateLimit({ windowMs: 60 * 60 * 1000, max: 60, key: byUser, message: "You're posting too fast, slow down a little" }),
   asyncHandler(async (req, res) => {
     await requireMembership(req.params.id, req.user!.sub);
     const { body, category, featureIds, images } = createCommentSchema.parse(req.body);
@@ -299,8 +301,10 @@ async function currentUser(userId: string) {
 }
 
 // GET /my/invitations — pilot invites addressed to my email that I haven't accepted.
+// Requires a verified email (it's keyed on the account's email address).
 participantRouter.get(
   "/invitations",
+  requireVerified,
   asyncHandler(async (req, res) => {
     const me = await currentUser(req.user!.sub);
     const memberships = await prisma.membership.findMany({
@@ -321,6 +325,7 @@ participantRouter.get(
 // POST /my/invitations/:token/accept — accept an invite addressed to my email.
 participantRouter.post(
   "/invitations/:token/accept",
+  requireVerified,
   asyncHandler(async (req, res) => {
     const me = await currentUser(req.user!.sub);
     const membership = await prisma.membership.findUnique({
@@ -337,7 +342,11 @@ participantRouter.post(
     });
     await prisma.membership.update({
       where: { id: membership.id },
-      data: { status: "ACCEPTED", acceptedAt: membership.acceptedAt ?? new Date() },
+      data: {
+        status: "ACCEPTED",
+        acceptedAt: membership.acceptedAt ?? new Date(),
+        inviteToken: randomBytes(24).toString("hex"), // single-use: dead-link it
+      },
     });
     res.json({ ok: true, pilotId: membership.pilotId });
   })
@@ -386,8 +395,11 @@ participantRouter.post(
 );
 
 // GET /my/admin-claims — company-admin seats offered to my email but not yet claimed.
+// Verified email required: the seat is keyed on the address, so we must know the
+// account actually controls it before offering (let alone granting) the seat.
 participantRouter.get(
   "/admin-claims",
+  requireVerified,
   asyncHandler(async (req, res) => {
     const me = await currentUser(req.user!.sub);
     const companies = await prisma.company.findMany({
@@ -402,6 +414,7 @@ participantRouter.get(
 // company admin bumps a plain tester to COMPANY_ADMIN, so we re-issue their token.
 participantRouter.post(
   "/admin-claims/:companyId/accept",
+  requireVerified,
   asyncHandler(async (req, res) => {
     const me = await currentUser(req.user!.sub);
     const company = await prisma.company.findUnique({ where: { id: req.params.companyId } });
@@ -415,15 +428,25 @@ participantRouter.post(
 
     await prisma.company.update({ where: { id: company.id }, data: { adminUserId: me.id } });
     // Keep a PM a PM (that would strip their powers); only promote plain testers.
+    // Promotion bumps tokenVersion so any other sessions with the old role die.
     const user =
       me.role === "PARTICIPANT"
-        ? await prisma.user.update({ where: { id: me.id }, data: { role: "COMPANY_ADMIN" } })
+        ? await prisma.user.update({
+            where: { id: me.id },
+            data: { role: "COMPANY_ADMIN", tokenVersion: { increment: 1 } },
+          })
         : me;
 
-    const token = signToken({ sub: user.id, role: user.role, email: user.email });
+    const token = signToken({ sub: user.id, role: user.role, email: user.email, tv: user.tokenVersion });
     res.json({
       token,
-      user: { id: user.id, email: user.email, name: user.name, role: user.role },
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        emailVerified: user.emailVerifiedAt !== null,
+      },
     });
   })
 );

@@ -124,6 +124,20 @@ export function adminReminderEmail(params: {
   };
 }
 
+// Sent to someone who signs up directly, to prove they own the email address.
+export function verifyEmail(params: { to: string; verifyUrl: string }): EmailMessage {
+  return {
+    to: params.to,
+    subject: "Confirm your email for Pilot Manager",
+    text: [
+      "Welcome to Pilot Manager! Confirm this email address to activate your account:",
+      params.verifyUrl,
+      "",
+      "This link expires in 24 hours. If you didn't create an account, ignore this email.",
+    ].join("\n"),
+  };
+}
+
 export function inviteEmail(params: {
   to: string;
   pilotName: string;

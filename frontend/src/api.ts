@@ -17,7 +17,7 @@ export function setToken(token: string | null) {
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(public status: number, message: string, public code?: string) {
     super(message);
   }
 }
@@ -44,7 +44,7 @@ export async function api<T = any>(
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new ApiError(res.status, (data as any).error ?? "Request failed");
+    throw new ApiError(res.status, (data as any).error ?? "Request failed", (data as any).code);
   }
   return data as T;
 }

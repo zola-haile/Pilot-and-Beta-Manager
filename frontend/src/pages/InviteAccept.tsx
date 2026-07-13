@@ -5,7 +5,6 @@ import { useAuth, User } from "../auth";
 
 interface InvitePreview {
   email: string;
-  name: string | null;
   company: string;
   pilot: { name: string; description: string | null };
   status: string;
@@ -26,10 +25,7 @@ export function InviteAcceptPage() {
 
   useEffect(() => {
     api<InvitePreview>(`/auth/invitations/${token}`, { auth: false })
-      .then((p) => {
-        setPreview(p);
-        if (p.name) setName(p.name);
-      })
+      .then((p) => setPreview(p))
       .catch((err) => setLoadError(err.message));
   }, [token]);
 

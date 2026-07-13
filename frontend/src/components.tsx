@@ -1,9 +1,34 @@
-import { ReactNode } from "react";
+import { ReactNode, useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "./auth";
+import { api } from "./api";
 
 export function StatusBadge({ status }: { status: string }) {
   return <span className={`badge badge-${status}`}>{status}</span>;
+}
+
+function VerifyBanner({ email }: { email: string }) {
+  const [state, setState] = useState<"idle" | "sending" | "sent">("idle");
+  async function resend() {
+    setState("sending");
+    try {
+      await api("/auth/resend-verification", { method: "POST", auth: false, body: { email } });
+    } finally {
+      setState("sent");
+    }
+  }
+  return (
+    <div className="verify-banner">
+      Your email isn't verified yet — verify it to unlock invitations and admin access.{" "}
+      {state === "sent" ? (
+        <b>Link sent — check your inbox.</b>
+      ) : (
+        <button className="linkish" disabled={state === "sending"} onClick={resend}>
+          Resend verification link
+        </button>
+      )}
+    </div>
+  );
 }
 
 export function Layout({ children }: { children: ReactNode }) {
@@ -55,6 +80,7 @@ export function Layout({ children }: { children: ReactNode }) {
           </div>
         )}
       </div>
+      {user && !user.emailVerified && <VerifyBanner email={user.email} />}
       <div className="container">{children}</div>
     </>
   );

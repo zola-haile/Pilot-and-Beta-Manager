@@ -1,7 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth";
 import { Spinner } from "./components";
-import { LoginPage, RegisterPage } from "./pages/Auth";
+import { LoginPage, RegisterPage, VerifyEmailPage } from "./pages/Auth";
 import { ApplicationsListPage, ApplicationDetailPage } from "./pages/Applications";
 import { FeedbackPage } from "./pages/Feedback";
 import { AppAnalyticsPage, PilotAnalyticsPage } from "./pages/Analytics";
@@ -38,6 +38,7 @@ export default function App() {
       <Route path="/" element={<Home />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/register" element={<RegisterPage />} />
+      <Route path="/verify/:token" element={<VerifyEmailPage />} />
       <Route path="/invite/:token" element={<InviteAcceptPage />} />
       <Route path="/admin/accept/:token" element={<AdminAcceptPage />} />
       <Route path="/join/:token" element={<JoinPage />} />

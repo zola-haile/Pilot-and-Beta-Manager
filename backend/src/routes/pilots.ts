@@ -16,6 +16,7 @@ import {
 import { CommentStatus, CommentPriority } from "@prisma/client";
 import { commentAnalytics, questionRollups, sentimentScore } from "../lib/analytics";
 import { pilotedFeatures, pilotedFeatureIds } from "../lib/pilotFeatures";
+import { signUploadPath } from "../lib/uploads";
 
 const OPEN_STATUSES = ["NEW", "TRIAGED", "PLANNED", "IN_PROGRESS"];
 
@@ -137,7 +138,8 @@ pilotsRouter.get(
           invitedAt: m.invitedAt,
           acceptedAt: m.acceptedAt,
           joined: m.participant.userId !== null,
-          inviteUrl: inviteUrl(m.inviteToken),
+          // Invite link is a bearer secret — only surface it until they've joined.
+          inviteUrl: m.participant.userId ? null : inviteUrl(m.inviteToken),
           entryCount: m.participant.userId ? entryCount.get(m.participant.userId) ?? 0 : 0,
         })),
       },
@@ -640,7 +642,7 @@ pilotsRouter.get(
         author: { name: c.user.name, email: c.user.email },
         company: companyByUser.get(c.user.id) ?? null,
         features: c.features.map((f) => ({ id: f.id, name: f.name })),
-        images: c.images.map((i) => ({ id: i.id, url: i.url })),
+        images: c.images.map((i) => ({ id: i.id, url: signUploadPath(i.url) })),
         status: c.status,
         priority: c.priority,
         assignee: c.assignee,

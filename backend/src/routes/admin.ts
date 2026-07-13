@@ -114,7 +114,9 @@ adminRouter.get(
           status: m.status,
           joined: m.participant.userId !== null,
           isYou: m.participant.userId === req.user!.sub,
-          inviteUrl: inviteUrl(m.inviteToken),
+          // Only expose the (bearer-secret) invite link while it's still needed —
+          // i.e. before the person has joined. Rotated/void once accepted.
+          inviteUrl: m.participant.userId ? null : inviteUrl(m.inviteToken),
           entryCount: m.participant.userId ? entryCount.get(m.participant.userId) ?? 0 : 0,
         })),
       },

@@ -14,6 +14,7 @@ import {
 } from "../lib/comments";
 import { CommentStatus, CommentPriority } from "@prisma/client";
 import { commentAnalytics, sentimentScore, weekStart } from "../lib/analytics";
+import { signUploadPath } from "../lib/uploads";
 
 const OPEN_STATUSES = ["NEW", "TRIAGED", "PLANNED", "IN_PROGRESS"];
 
@@ -648,7 +649,7 @@ applicationRouter.get(
         company: companyByPilotUser.get(`${c.pilotId}:${c.user.id}`) ?? null,
         pilot: c.pilot,
         features: c.features.map((f) => ({ id: f.id, name: f.name })),
-        images: c.images.map((i) => ({ id: i.id, url: i.url })),
+        images: c.images.map((i) => ({ id: i.id, url: signUploadPath(i.url) })),
         status: c.status,
         priority: c.priority,
         assignee: c.assignee,

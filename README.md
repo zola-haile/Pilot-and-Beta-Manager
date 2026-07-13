@@ -69,12 +69,17 @@ Three roles:
 
 **Onboarding** — you either arrive through a link (an emailed invite or a company's
 self-enroll link) or you **sign up directly**: the register screen asks whether you're here
-to *run pilots* (PM) or *take part as a tester* (Participant). A signed-in tester doesn't need
-a fresh-account token — their home surfaces **pending invitations** addressed to their email
-(one-click accept), a **paste-a-link** box to join via any invite or self-enroll link, and,
-if a PM has designated their email as a company's admin, a prompt to **claim that admin seat**
-(which promotes them to Company Admin). Companies stay attached to a PM; a user becomes an
-admin by claiming an offered seat, not by creating an org.
+to *run pilots* (PM) or *take part as a tester* (Participant). Direct sign-ups must **verify
+their email** (a confirmation link is emailed — printed to the backend console with the
+default transport) before they can sign in or act on anything tied to their address. Arriving
+through an emailed invite/admin link counts as proof of the address, so those users are
+verified automatically. A signed-in tester doesn't need a fresh-account token — their home
+surfaces **pending invitations** addressed to their email (one-click accept), a
+**paste-a-link** box to join via any invite or self-enroll link, and, if a PM has designated
+their email as a company's admin, a prompt to **claim that admin seat** (which promotes them
+to Company Admin). Because becoming an admin is keyed on the email address, those email-scoped
+actions require a verified email. Companies stay attached to a PM; a user becomes an admin by
+claiming an offered seat, not by creating an org.
 
 ## What's built
 
@@ -140,8 +145,10 @@ participant flow.
 
 | Method | Path | Who | Purpose |
 | --- | --- | --- | --- |
-| POST | `/auth/register` | public | Create an account (PM or tester via `role`) |
-| POST | `/auth/login` | public | Sign in |
+| POST | `/auth/register` | public | Create an account (PM or tester via `role`); emails a verification link |
+| POST | `/auth/verify/:token` | public | Confirm an email address and sign in |
+| POST | `/auth/resend-verification` | public | Re-send the verification link |
+| POST | `/auth/login` | public | Sign in (blocked until the email is verified) |
 | GET | `/auth/me` | auth | Current user |
 | GET | `/auth/invitations/:token` | public | Preview an invite |
 | POST | `/auth/invitations/:token/accept` | public | Accept invite, set password |

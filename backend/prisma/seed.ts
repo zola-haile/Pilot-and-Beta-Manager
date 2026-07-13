@@ -18,6 +18,7 @@ async function main() {
       name: "Pat PM",
       role: "PM",
       passwordHash: await hash("password123"),
+      emailVerifiedAt: new Date(),
     },
   });
 
@@ -47,6 +48,7 @@ async function main() {
       name: "Casey Admin",
       role: "COMPANY_ADMIN",
       passwordHash: await hash("adminpass123"),
+      emailVerifiedAt: new Date(),
     },
   });
   await prisma.company.update({ where: { id: cp.id }, data: { adminUserId: cpAdmin.id } });
@@ -60,7 +62,13 @@ async function main() {
   ) {
     const user = password
       ? await prisma.user.create({
-          data: { email, name, role: "PARTICIPANT", passwordHash: await hash(password) },
+          data: {
+            email,
+            name,
+            role: "PARTICIPANT",
+            passwordHash: await hash(password),
+            emailVerifiedAt: new Date(),
+          },
         })
       : null;
     return prisma.participant.create({

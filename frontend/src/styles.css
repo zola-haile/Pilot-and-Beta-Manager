@@ -275,6 +275,30 @@ textarea {
   border: 1px solid #bfdbfe;
 }
 
+/* Inline "button that looks like a link" */
+.linkish {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.linkish:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Unverified-email nudge under the top bar */
+.verify-banner {
+  background: #fffbeb;
+  color: #92400e;
+  border-bottom: 1px solid #fde68a;
+  padding: 10px 24px;
+  font-size: 14px;
+}
+
 /* Tables / lists */
 .list-item {
   display: flex;

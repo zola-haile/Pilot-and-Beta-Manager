@@ -4,7 +4,12 @@ import { NextFunction, Request, Response } from "express";
  * A thrown HttpError becomes a clean JSON error response via the error handler.
  */
 export class HttpError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+    /** Optional machine-readable code so clients can branch on the reason. */
+    public code?: string
+  ) {
     super(message);
   }
 }

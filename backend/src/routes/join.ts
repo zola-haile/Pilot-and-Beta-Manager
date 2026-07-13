@@ -3,8 +3,10 @@ import { randomBytes } from "crypto";
 import { z } from "zod";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
-import { hashPassword } from "../lib/password";
+import { hashPassword, assertStrongPassword } from "../lib/password";
 import { signToken } from "../lib/jwt";
+import { sendEmail, verifyEmail } from "../lib/email";
+import { config } from "../config";
 
 // Public self-enroll via a company's shareable pilot link. No auth required.
 export const joinRouter = Router();
@@ -37,25 +39,41 @@ const acceptSchema = z.object({
 });
 
 // POST /join/:token/accept — self-enroll as a participant under that company.
+// For NEW people only: an existing, active account must sign in and use the
+// logged-in "join a link" flow (so a share link can't enroll someone else's
+// account or probe/alter it). New accounts start unverified and are emailed a
+// confirmation link.
 joinRouter.post(
   "/:token/accept",
   asyncHandler(async (req, res) => {
     const pc = await loadShare(req.params.token);
     const { email, name, password } = acceptSchema.parse(req.body);
+    assertStrongPassword(password, email);
 
     // Create or activate the user account.
     let user = await prisma.user.findUnique({ where: { email } });
+    if (user && user.passwordHash) {
+      throw new HttpError(
+        409,
+        "An account with this email already exists — sign in, then use “Have a link?” to join."
+      );
+    }
+    const { verifyToken, verifyTokenExpiresAt } = {
+      verifyToken: randomBytes(24).toString("hex"),
+      verifyTokenExpiresAt: new Date(Date.now() + 24 * 3600 * 1000),
+    };
     if (!user) {
       user = await prisma.user.create({
-        data: { email, name, role: "PARTICIPANT", passwordHash: await hashPassword(password) },
+        data: { email, name, role: "PARTICIPANT", passwordHash: await hashPassword(password), verifyToken, verifyTokenExpiresAt },
       });
-    } else if (!user.passwordHash) {
+    } else {
+      // A shell account pre-created by a PM invite (no password yet).
       user = await prisma.user.update({
         where: { id: user.id },
-        data: { passwordHash: await hashPassword(password), name: user.name ?? name },
+        data: { passwordHash: await hashPassword(password), name: user.name ?? name, verifyToken, verifyTokenExpiresAt },
       });
     }
-    // Note: an existing account keeps its current password (self-enroll won't reset it).
+    await sendEmail(verifyEmail({ to: email, verifyUrl: `${config.appUrl.replace(/\/$/, "")}/verify/${verifyToken}` }));
 
     // Participant under this company.
     const participant = await prisma.participant.upsert({
@@ -85,7 +103,16 @@ joinRouter.post(
       });
     }
 
-    const token = signToken({ sub: user.id, role: user.role, email: user.email });
-    res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role } });
+    const token = signToken({ sub: user.id, role: user.role, email: user.email, tv: user.tokenVersion });
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        emailVerified: user.emailVerifiedAt !== null,
+      },
+    });
   })
 );

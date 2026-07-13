@@ -47,6 +47,14 @@ model User {
   role         Role     @default(PARTICIPANT)
   createdAt    DateTime @default(now())
 
+  // Email ownership must be proven before an account can act on email-scoped
+  // resources (claiming an admin seat, picking up invites addressed to it).
+  emailVerifiedAt      DateTime?
+  verifyToken          String?   @unique
+  verifyTokenExpiresAt DateTime?
+  // Bumped to invalidate every previously issued JWT for this user (revocation).
+  tokenVersion         Int       @default(0)
+
   applications        Application[] @relation("AppOwner") // a PM can own many applications
   companies           Company[]     @relation("CompanyOwner") // companies this PM manages (top-level)
   adminCompanies      Company[]     @relation("CompanyAdmin") // companies this user administers

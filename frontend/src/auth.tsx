@@ -6,6 +6,7 @@ export interface User {
   email: string;
   name: string | null;
   role: "PM" | "COMPANY_ADMIN" | "PARTICIPANT";
+  emailVerified: boolean;
 }
 
 interface AuthState {
