@@ -44,7 +44,7 @@ export function Layout({ children }: { children: ReactNode }) {
           {user?.role === "PM" && (
             <nav className="row" style={{ gap: 16 }}>
               <NavLink to="/" end className={({ isActive }) => (isActive ? "nav-active" : "nav-link")}>
-                Applications
+                Projects
               </NavLink>
               <NavLink to="/companies" className={({ isActive }) => (isActive ? "nav-active" : "nav-link")}>
                 Companies

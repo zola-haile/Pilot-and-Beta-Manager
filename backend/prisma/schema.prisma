@@ -61,6 +61,9 @@ model User {
   participantProfiles Participant[] // identities this user has accepted
   submissions         Submission[]
   comments            Comment[]
+  featureRatings      FeatureRating[]
+  chatMessages        ChatMessage[]   @relation("ChatAuthor")
+  chatThreads         ChatMessage[]   @relation("ChatThread") // private DM threads this user is the participant of
 }
 
 // An application owned by a PM — a product being piloted. A PM can own many.
@@ -136,6 +139,8 @@ model Pilot {
   pilotCompanies PilotCompany[]
   comments       Comment[]
   pilotFeatures  PilotFeature[]
+  featureRatings FeatureRating[]
+  chatMessages   ChatMessage[]
 }
 
 // Which application features a pilot is testing (used when allFeatures = false).
@@ -237,8 +242,26 @@ model Feature {
   comments      Comment[]
   questions     Question[]
   pilotFeatures PilotFeature[]
+  ratings       FeatureRating[]
 
   @@unique([applicationId, name])
+}
+
+// A participant's 1–5 star rating of one feature within a specific pilot. One
+// rating per (pilot, feature, user) — re-rating updates the same row.
+model FeatureRating {
+  id        String   @id @default(cuid())
+  pilotId   String
+  pilot     Pilot    @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  featureId String
+  feature   Feature  @relation(fields: [featureId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stars     Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([pilotId, featureId, userId])
 }
 
 enum CommentCategory {
@@ -303,6 +326,43 @@ model Comment {
   images   CommentImage[]
   features Feature[]
   notes    CommentNote[]
+  chatShares ChatMessage[] // times this report was shared into the pilot chat
+}
+
+// What surface a chat message belongs to:
+//  - PUBLIC       a normal message in the pilot's group channel
+//  - ANNOUNCEMENT a highlighted broadcast, posted by the PM only
+//  - PRIVATE      a direct line between one participant and the PM
+enum ChatKind {
+  PUBLIC
+  ANNOUNCEMENT
+  PRIVATE
+}
+
+// One message in a pilot's chat. The group channel (PUBLIC + ANNOUNCEMENT) is
+// shared by all members and the owning PM. A PRIVATE message belongs to a 1:1
+// thread between the PM and one participant, identified by `threadUserId` (that
+// participant); both parties' messages in the thread carry the same threadUserId.
+// A message may also carry a snapshot reference to one of the author's own reports
+// (Comment) shared into the chat. `anonymous` hides the author's name (public only).
+model ChatMessage {
+  id           String   @id @default(cuid())
+  pilotId      String
+  pilot        Pilot    @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User     @relation("ChatAuthor", fields: [userId], references: [id], onDelete: Cascade)
+  kind         ChatKind @default(PUBLIC)
+  // For PRIVATE messages: the participant party of the DM thread.
+  threadUserId String?
+  threadUser   User?    @relation("ChatThread", fields: [threadUserId], references: [id], onDelete: Cascade)
+  body         String   @default("")
+  anonymous    Boolean  @default(false)
+  commentId    String? // set when this message shares a report
+  comment      Comment? @relation(fields: [commentId], references: [id], onDelete: SetNull)
+  createdAt    DateTime @default(now())
+
+  @@index([pilotId, createdAt])
+  @@index([pilotId, threadUserId])
 }
 
 // A private PM annotation on a comment — never shown to participants.

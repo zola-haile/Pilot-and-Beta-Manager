@@ -15,6 +15,7 @@ import {
 import { CommentStatus, CommentPriority } from "@prisma/client";
 import { commentAnalytics, sentimentScore, weekStart } from "../lib/analytics";
 import { signUploadPath } from "../lib/uploads";
+import { buildPilotExport } from "../lib/export";
 
 const OPEN_STATUSES = ["NEW", "TRIAGED", "PLANNED", "IN_PROGRESS"];
 
@@ -102,6 +103,27 @@ applicationRouter.get(
   asyncHandler(async (req, res) => {
     const app = await getOwnedApplication(req.params.appId, req.user!.sub);
     res.json({ application: { id: app.id, name: app.name, description: app.description } });
+  })
+);
+
+// GET /applications/:appId/export — every pilot in the project, fully exported.
+applicationRouter.get(
+  "/applications/:appId/export",
+  pm,
+  asyncHandler(async (req, res) => {
+    const app = await getOwnedApplication(req.params.appId, req.user!.sub);
+    const pilots = await prisma.pilot.findMany({
+      where: { applicationId: app.id },
+      select: { id: true },
+      orderBy: { createdAt: "asc" },
+    });
+    const exports = [];
+    for (const p of pilots) exports.push(await buildPilotExport(p.id));
+    res.json({
+      exportedAt: new Date().toISOString(),
+      project: { id: app.id, name: app.name },
+      pilots: exports,
+    });
   })
 );
 

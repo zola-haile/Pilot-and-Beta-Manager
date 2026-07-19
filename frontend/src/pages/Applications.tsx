@@ -33,12 +33,12 @@ export function ApplicationsListPage() {
     <Layout>
       <div className="spread" style={{ marginBottom: 20 }}>
         <div>
-          <h1>Applications</h1>
+          <h1>Projects</h1>
           <p className="muted" style={{ margin: 0 }}>
-            Each application is a product you're piloting. Open one to manage its pilots and companies.
+            Each project is a product you're piloting. Open one to manage its pilots and companies.
           </p>
         </div>
-        <button onClick={() => setShowForm((s) => !s)}>{showForm ? "Close" : "+ New application"}</button>
+        <button onClick={() => setShowForm((s) => !s)}>{showForm ? "Close" : "+ New project"}</button>
       </div>
 
       {error && <div className="alert alert-error">{error}</div>}
@@ -55,7 +55,7 @@ export function ApplicationsListPage() {
         <Spinner />
       ) : apps.length === 0 ? (
         <div className="card empty">
-          No applications yet. Click <b>+ New application</b> to create your first one.
+          No projects yet. Click <b>+ New project</b> to create your first one.
         </div>
       ) : (
         <div className="stack">
@@ -102,7 +102,7 @@ function NewAppForm({ onCreated }: { onCreated: () => void }) {
 
   return (
     <form className="card" style={{ marginBottom: 20 }} onSubmit={submit}>
-      <h2>New application</h2>
+      <h2>New project</h2>
       {error && <div className="alert alert-error">{error}</div>}
       <label className="field">
         <span>Name</span>
@@ -113,7 +113,7 @@ function NewAppForm({ onCreated }: { onCreated: () => void }) {
         <textarea value={description} onChange={(e) => setDescription(e.target.value)} />
       </label>
       <button type="submit" disabled={busy}>
-        {busy ? "Creating…" : "Create application"}
+        {busy ? "Creating…" : "Create project"}
       </button>
     </form>
   );
@@ -160,7 +160,7 @@ export function ApplicationDetailPage() {
   async function deleteApp() {
     if (
       !confirm(
-        "Delete this application? This removes all of its pilots, companies, participants and responses. This cannot be undone."
+        "Delete this project? This removes all of its pilots, companies, participants and responses. This cannot be undone."
       )
     )
       return;
@@ -178,7 +178,7 @@ export function ApplicationDetailPage() {
   return (
     <Layout>
       <Link to="/" className="muted" style={{ fontSize: 14 }}>
-        ← All applications
+        ← All projects
       </Link>
 
       {editing ? (
@@ -193,7 +193,7 @@ export function ApplicationDetailPage() {
         <div className="spread" style={{ marginTop: 10 }}>
           <div>
             <div className="muted" style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: 0.5 }}>
-              Application
+              Project
             </div>
             <h1 style={{ margin: "2px 0 0" }}>📦 {app.name}</h1>
             {app.description && <p className="muted" style={{ margin: "6px 0 0" }}>{app.description}</p>}
@@ -424,7 +424,7 @@ function FeaturesSection({ appId }: { appId: string }) {
     <div className="card">
       <h2>Features</h2>
       <p className="muted" style={{ marginTop: 0 }}>
-        The parts of this application participants can tag in their comments.
+        The parts of this project participants can tag in their comments.
       </p>
       {error && <div className="alert alert-error">{error}</div>}
       {!features ? (
@@ -486,7 +486,7 @@ function AppEditForm({ app, onDone }: { app: Application; onDone: (updated: Appl
   return (
     <form className="card" style={{ marginTop: 10 }} onSubmit={save}>
       <label className="field">
-        <span>Application name</span>
+        <span>Project name</span>
         <input value={name} onChange={(e) => setName(e.target.value)} required />
       </label>
       <label className="field">
@@ -581,7 +581,7 @@ function NewPilotForm({ appId, onCreated }: { appId: string; onCreated: () => vo
         {!allFeatures &&
           (appFeatures.length === 0 ? (
             <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-              No features yet — add some on the application page first.
+              No features yet — add some on the project page first.
             </p>
           ) : (
             <div className="stack" style={{ gap: 6 }}>

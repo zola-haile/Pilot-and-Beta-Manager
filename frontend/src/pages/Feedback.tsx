@@ -70,13 +70,13 @@ export function FeedbackPage() {
   return (
     <Layout>
       <Link to={`/applications/${appId}`} className="muted" style={{ fontSize: 14 }}>
-        ← Back to application
+        ← Back to project
       </Link>
       <div className="row" style={{ marginTop: 10, marginBottom: 4 }}>
         <h1 style={{ margin: 0 }}>Feedback{appName ? ` · ${appName}` : ""}</h1>
       </div>
       <p className="muted" style={{ marginTop: 0 }}>
-        Every comment across all of this application's pilots.
+        Every comment across all of this project's pilots.
       </p>
       <FeedbackWorkspace scope="app" fetchPath={`/applications/${appId}/comments`} applicationId={appId!} />
     </Layout>

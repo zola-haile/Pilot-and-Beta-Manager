@@ -3,6 +3,11 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { Layout, Spinner, StatusBadge } from "../components";
 import { FeedbackWorkspace } from "./Feedback";
+import { ChatPanel, PrivateThreadsPanel } from "./Chat";
+import {
+  PilotExport, downloadText, exportBaseName,
+  commentsCsv, responsesCsv, ratingsCsv, chatCsv,
+} from "../export";
 
 const QUESTION_TYPES = [
   { value: "TEXT", label: "Short text" },
@@ -82,6 +87,7 @@ export function PilotDetailPage() {
   const [pilot, setPilot] = useState<PilotDetail | null>(null);
   const [responses, setResponses] = useState<ResponseRow[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<"setup" | "people" | "responses" | "feedback" | "chat">("setup");
 
   async function load() {
     try {
@@ -114,7 +120,7 @@ export function PilotDetailPage() {
   return (
     <Layout>
       <Link to={`/applications/${pilot.applicationId}`} className="muted" style={{ fontSize: 14 }}>
-        ← Back to application
+        ← Back to project
       </Link>
       <div className="spread" style={{ marginTop: 10, marginBottom: 6 }}>
         <div className="row">
@@ -122,6 +128,7 @@ export function PilotDetailPage() {
           <StatusBadge status={pilot.status} />
         </div>
         <div className="row">
+          <ExportMenu pilotId={pilot.id} />
           <Link className="btn-ghost btn-sm" to={`/pilots/${pilot.id}/analytics`}>
             📊 Analytics
           </Link>
@@ -135,37 +142,78 @@ export function PilotDetailPage() {
         {formatRange(pilot.startDate, pilot.endDate)}
       </p>
 
-      <div className="stack" style={{ marginTop: 24 }}>
-        <PilotFeaturesSection
-          pilotId={pilot.id}
-          applicationId={pilot.applicationId}
-          allFeatures={pilot.allFeatures}
-          features={pilot.features}
-          onChange={load}
-        />
-        <QuestionsSection
-          pilotId={pilot.id}
-          questions={pilot.questions}
-          features={pilot.features}
-          onChange={load}
-        />
-        <CompaniesInPilotSection pilotId={pilot.id} companies={pilot.companies} onChange={load} />
-        <ParticipantsSection pilotId={pilot.id} participants={pilot.participants} onChange={load} />
-        <ResponsesSection pilotId={pilot.id} questions={pilot.questions} responses={responses} onChange={load} />
-        <div className="card">
-          <div className="spread" style={{ marginBottom: 4 }}>
-            <h2 style={{ margin: 0 }}>Comments &amp; feedback</h2>
-            <Link to={`/applications/${pilot.applicationId}/feedback`} className="btn-ghost btn-sm">
-              All app feedback →
-            </Link>
+      <div className="tabbar" style={{ marginTop: 20 }}>
+        {([
+          { key: "setup", label: "Setup" },
+          { key: "people", label: "People", count: pilot.participants.length },
+          { key: "responses", label: "Responses", count: responses.length },
+          { key: "feedback", label: "Feedback" },
+          { key: "chat", label: "Chat" },
+        ] as const).map((t) => (
+          <button
+            key={t.key}
+            className={`tabbtn ${tab === t.key ? "active" : ""}`}
+            onClick={() => setTab(t.key)}
+          >
+            {t.label}
+            {"count" in t && t.count > 0 && <span className="tabbtn__count">{t.count}</span>}
+          </button>
+        ))}
+      </div>
+
+      <div className="stack" style={{ marginTop: 20 }}>
+        {tab === "setup" && (
+          <>
+            <PilotFeaturesSection
+              pilotId={pilot.id}
+              applicationId={pilot.applicationId}
+              allFeatures={pilot.allFeatures}
+              features={pilot.features}
+              onChange={load}
+            />
+            <QuestionsSection
+              pilotId={pilot.id}
+              questions={pilot.questions}
+              features={pilot.features}
+              onChange={load}
+            />
+          </>
+        )}
+        {tab === "people" && (
+          <>
+            <CompaniesInPilotSection pilotId={pilot.id} companies={pilot.companies} onChange={load} />
+            <ParticipantsSection pilotId={pilot.id} participants={pilot.participants} onChange={load} />
+          </>
+        )}
+        {tab === "responses" && (
+          <ResponsesSection pilotId={pilot.id} questions={pilot.questions} responses={responses} onChange={load} />
+        )}
+        {tab === "feedback" && (
+          <div className="card">
+            <div className="spread" style={{ marginBottom: 4 }}>
+              <h2 style={{ margin: 0 }}>Comments &amp; feedback</h2>
+              <Link to={`/applications/${pilot.applicationId}/feedback`} className="btn-ghost btn-sm">
+                All project feedback →
+              </Link>
+            </div>
+            <FeedbackWorkspace
+              scope="pilot"
+              fetchPath={`/pilots/${pilot.id}/comments`}
+              applicationId={pilot.applicationId}
+              pilotId={pilot.id}
+            />
           </div>
-          <FeedbackWorkspace
-            scope="pilot"
-            fetchPath={`/pilots/${pilot.id}/comments`}
-            applicationId={pilot.applicationId}
-            pilotId={pilot.id}
-          />
-        </div>
+        )}
+        {tab === "chat" && (
+          <>
+            <ChatPanel
+              basePath={`/pilots/${pilot.id}/chat`}
+              blurb="The group channel for everyone in this pilot. Reply to questions, or post an announcement."
+              allowAnnouncement
+            />
+            <PrivateThreadsPanel pilotId={pilot.id} />
+          </>
+        )}
       </div>
     </Layout>
   );
@@ -177,6 +225,77 @@ function formatRange(start: string | null, end: string | null): string {
   if (start) return `Starts ${f(start)}`;
   if (end) return `Ends ${f(end)}`;
   return "No dates set (draft)";
+}
+
+// Fetches the pilot's full export once, then offers JSON + per-dataset CSV downloads.
+function ExportMenu({ pilotId }: { pilotId: string }) {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<PilotExport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function toggle() {
+    if (open) return setOpen(false);
+    setOpen(true);
+    if (!data) {
+      setBusy(true);
+      setError(null);
+      try {
+        setData(await api<PilotExport>(`/pilots/${pilotId}/export`));
+      } catch (err: any) {
+        setError(err.message);
+      } finally {
+        setBusy(false);
+      }
+    }
+  }
+
+  function save(kind: "json" | "comments" | "responses" | "ratings" | "chat") {
+    if (!data) return;
+    const base = exportBaseName(data);
+    if (kind === "json") return downloadText(`${base}.json`, JSON.stringify(data, null, 2), "application/json");
+    const csv = { comments: commentsCsv, responses: responsesCsv, ratings: ratingsCsv, chat: chatCsv }[kind](data);
+    downloadText(`${base}-${kind}.csv`, csv, "text/csv");
+  }
+
+  const counts = data && {
+    comments: data.comments.length,
+    responses: data.responses.length,
+    ratings: data.featureRatings.entries.length,
+    chat: data.chat.length,
+  };
+
+  return (
+    <div className="export-wrap">
+      <button className="btn-ghost btn-sm" onClick={toggle}>⬇ Export</button>
+      {open && (
+        <div className="export-menu">
+          {busy && <div className="muted" style={{ padding: 8 }}>Preparing…</div>}
+          {error && <div className="alert alert-error" style={{ margin: 8 }}>{error}</div>}
+          {data && (
+            <>
+              <button className="export-item" onClick={() => save("json")}>
+                <b>Everything</b> <span className="muted">· JSON</span>
+              </button>
+              <div className="export-sep" />
+              <button className="export-item" onClick={() => save("comments")} disabled={!counts!.comments}>
+                Feedback comments <span className="muted">· CSV ({counts!.comments})</span>
+              </button>
+              <button className="export-item" onClick={() => save("responses")} disabled={!counts!.responses}>
+                Survey responses <span className="muted">· CSV ({counts!.responses})</span>
+              </button>
+              <button className="export-item" onClick={() => save("ratings")} disabled={!counts!.ratings}>
+                Feature ratings <span className="muted">· CSV ({counts!.ratings})</span>
+              </button>
+              <button className="export-item" onClick={() => save("chat")} disabled={!counts!.chat}>
+                Pilot chat <span className="muted">· CSV ({counts!.chat})</span>
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /* ------------------------------ Questions ------------------------------ */
@@ -437,7 +556,7 @@ function PilotFeaturesSection({
       </div>
       <p className="muted" style={{ marginTop: 4 }}>
         {allFeatures
-          ? "Testing all of the application's features (new ones are added automatically)."
+          ? "Testing all of the project's features (new ones are added automatically)."
           : "Testing a selected subset of features."}
       </p>
       {error && <div className="alert alert-error">{error}</div>}
@@ -467,7 +586,7 @@ function PilotFeaturesSection({
             <div className="stack" style={{ gap: 6, marginBottom: 12 }}>
               {appFeatures.length === 0 ? (
                 <p className="muted" style={{ fontSize: 13 }}>
-                  This application has no features yet.
+                  This project has no features yet.
                 </p>
               ) : (
                 appFeatures.map((f) => (

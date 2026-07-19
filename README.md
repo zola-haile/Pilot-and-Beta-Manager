@@ -187,6 +187,9 @@ participant flow.
 | POST | `/my/join` | auth | Join a pilot via a self-enroll share token |
 | GET/POST | `/my/admin-claims[/:companyId/accept]` | auth | Offered admin seats / claim one (re-issues token) |
 | GET | `/my/pilots` | participant | Pilots I'm in |
-| GET | `/my/pilots/:id` | participant | Questions + my answers |
+| GET | `/my/pilots/:id` | participant | Questions, my answers, features (with my rating + avg), pilot dates |
 | PUT | `/my/pilots/:id/submission` | participant | Save draft / submit |
+| PUT | `/my/pilots/:id/features/:fid/rating` | participant | Star-rate a piloted feature (1–5) |
+| GET/POST | `/my/pilots/:id/chat` | participant | Read / post in the pilot's group channel (optionally anonymous or sharing a report) |
+| GET/POST | `/pilots/:id/chat` | PM | Read / reply in a pilot's channel (as the organizer) |
 ```

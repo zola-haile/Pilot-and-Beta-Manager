@@ -83,7 +83,7 @@ export function AppAnalyticsPage() {
     <AnalyticsLayout
       back={{ to: `/applications/${appId}`, label: "← Back to application" }}
       title={`Analytics${appName ? ` · ${appName}` : ""}`}
-      subtitle="Across every pilot in this application."
+      subtitle="Across every pilot in this project."
       fetchPath={`/applications/${appId}/analytics`}
     />
   );

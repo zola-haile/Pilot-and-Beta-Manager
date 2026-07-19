@@ -17,6 +17,10 @@ import { CommentStatus, CommentPriority } from "@prisma/client";
 import { commentAnalytics, questionRollups, sentimentScore } from "../lib/analytics";
 import { pilotedFeatures, pilotedFeatureIds } from "../lib/pilotFeatures";
 import { signUploadPath } from "../lib/uploads";
+import {
+  listPublicChat, listPrivateThread, listPrivateThreads, serializeCreated,
+} from "../lib/chat";
+import { buildPilotExport } from "../lib/export";
 
 const OPEN_STATUSES = ["NEW", "TRIAGED", "PLANNED", "IN_PROGRESS"];
 
@@ -881,5 +885,102 @@ pilotsRouter.delete(
     }
     await prisma.comment.delete({ where: { id: comment.id } }); // cascades images
     res.status(204).end();
+  })
+);
+
+// GET /pilots/:id/export — the pilot's complete dataset (feedback, responses,
+// ratings, chat) as structured JSON. The client turns this into JSON/CSV files.
+pilotsRouter.get(
+  "/:id/export",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    res.json(await buildPilotExport(req.params.id));
+  })
+);
+
+/* -------------------------------- Chat -------------------------------- */
+// The PM's window into a pilot's group channel — same messages the participants
+// see, so the PM can answer clarifications. The PM is the channel's organizer.
+
+// GET /pilots/:id/chat — read the public channel.
+pilotsRouter.get(
+  "/:id/chat",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    res.json({ messages: await listPublicChat(req.params.id, req.user!.sub, req.user!.sub) });
+  })
+);
+
+const pmChatSchema = z.object({
+  body: z.string().min(1, "Write a message").max(4000),
+  anonymous: z.boolean().optional().default(false),
+  announcement: z.boolean().optional().default(false),
+});
+
+// POST /pilots/:id/chat — post in the channel as the organizer. `announcement`
+// pins it as a highlighted broadcast (never anonymous).
+pilotsRouter.post(
+  "/:id/chat",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    const { body, anonymous, announcement } = pmChatSchema.parse(req.body);
+    const created = await prisma.chatMessage.create({
+      data: {
+        pilotId: req.params.id,
+        userId: req.user!.sub,
+        body: body.trim(),
+        kind: announcement ? "ANNOUNCEMENT" : "PUBLIC",
+        anonymous: announcement ? false : anonymous,
+      },
+    });
+    res.status(201).json({ message: await serializeCreated(created.id, req.user!.sub, req.user!.sub) });
+  })
+);
+
+/* --------------------------- Private DM threads --------------------------- */
+// One-to-one lines between the PM and individual participants.
+
+// GET /pilots/:id/chat/private — summary of participants with an open thread.
+pilotsRouter.get(
+  "/:id/chat/private",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    res.json({ threads: await listPrivateThreads(req.params.id) });
+  })
+);
+
+// GET /pilots/:id/chat/private/:userId — one participant's thread.
+pilotsRouter.get(
+  "/:id/chat/private/:userId",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    const me = req.user!.sub;
+    res.json({ messages: await listPrivateThread(req.params.id, req.params.userId, me, me) });
+  })
+);
+
+// POST /pilots/:id/chat/private/:userId — reply to that participant privately.
+pilotsRouter.post(
+  "/:id/chat/private/:userId",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!.sub);
+    const { body } = z.object({ body: z.string().min(1, "Write a message").max(4000) }).parse(req.body);
+
+    // The target must be a participant of this pilot.
+    const membership = await prisma.membership.findFirst({
+      where: { pilotId: req.params.id, participant: { userId: req.params.userId } },
+    });
+    if (!membership) throw new HttpError(404, "Participant not found in this pilot");
+
+    const created = await prisma.chatMessage.create({
+      data: {
+        pilotId: req.params.id,
+        userId: req.user!.sub,
+        kind: "PRIVATE",
+        threadUserId: req.params.userId,
+        body: body.trim(),
+      },
+    });
+    res.status(201).json({ message: await serializeCreated(created.id, req.user!.sub, req.user!.sub) });
   })
 );

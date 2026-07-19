@@ -70,7 +70,7 @@ export function CompaniesPage() {
     <Layout>
       <h1>Companies</h1>
       <p className="muted" style={{ marginTop: 0 }}>
-        Your partner organizations — reusable across pilots in any of your applications. Each has an
+        Your partner organizations — reusable across pilots in any of your projects. Each has an
         admin who invites their own people. Click a company to see its people.
       </p>
       {notice && <div className="alert alert-success">{notice}</div>}
@@ -187,7 +187,7 @@ export function CompanyDetailPage() {
   async function deletePerson(participantId: string) {
     if (
       !confirm(
-        "Remove this person? This deletes them from every pilot in this application, along with their responses."
+        "Remove this person? This deletes them from every pilot in this project, along with their responses."
       )
     )
       return;

@@ -11,6 +11,7 @@ import { CommentCategory } from "@prisma/client";
 import { COMMENT_CATEGORIES, CATEGORY_VALUES } from "../lib/comments";
 import { saveDataUrlImage, signUploadPath } from "../lib/uploads";
 import { pilotedFeatures, pilotedFeatureIds } from "../lib/pilotFeatures";
+import { listPublicChat, listPrivateThread, serializeCreated } from "../lib/chat";
 
 export const participantRouter = Router();
 
@@ -80,6 +81,22 @@ participantRouter.get(
     if (!pilot) throw new HttpError(404, "Pilot not found");
     const features = await pilotedFeatures(pilot);
 
+    // Per-feature star ratings: this user's own rating + the shared average.
+    const featureIds = features.map((f) => f.id);
+    const [mine, agg] = await Promise.all([
+      prisma.featureRating.findMany({
+        where: { pilotId: pilot.id, userId: req.user!.sub, featureId: { in: featureIds } },
+      }),
+      prisma.featureRating.groupBy({
+        by: ["featureId"],
+        where: { pilotId: pilot.id, featureId: { in: featureIds } },
+        _avg: { stars: true },
+        _count: { _all: true },
+      }),
+    ]);
+    const myByFeature = new Map(mine.map((r) => [r.featureId, r.stars]));
+    const aggByFeature = new Map(agg.map((a) => [a.featureId, a]));
+
     const draft = await prisma.submission.findFirst({
       where: { pilotId: pilot.id, userId: req.user!.sub, submittedAt: null },
       include: { answers: true },
@@ -96,10 +113,23 @@ participantRouter.get(
         name: pilot.name,
         description: pilot.description,
         status: pilotStatus(pilot.startDate, pilot.endDate),
+        startDate: pilot.startDate,
+        endDate: pilot.endDate,
         questions: pilot.questions,
       },
-      // Only the features this pilot is testing (drives grouping + the composer).
-      features: features.map((f) => ({ id: f.id, name: f.name })),
+      // Only the features this pilot is testing (drives grouping + the composer +
+      // the star ratings). myRating is this user's; avgRating/ratingCount are shared.
+      features: features.map((f) => {
+        const a = aggByFeature.get(f.id);
+        return {
+          id: f.id,
+          name: f.name,
+          description: f.description,
+          myRating: myByFeature.get(f.id) ?? null,
+          avgRating: a?._avg.stars ?? null,
+          ratingCount: a?._count._all ?? 0,
+        };
+      }),
       commentCategories: COMMENT_CATEGORIES,
       draft: { answers: draft ? answersToMap(draft.answers) : {} },
       history: history.map((h) => ({
@@ -190,6 +220,147 @@ participantRouter.delete(
     }
     await prisma.submission.delete({ where: { id: submission.id } }); // cascades answers
     res.status(204).end();
+  })
+);
+
+/* --------------------------- Feature ratings --------------------------- */
+
+const ratingSchema = z.object({ stars: z.number().int().min(1).max(5) });
+
+// PUT /my/pilots/:id/features/:featureId/rating — set (or change) the current
+// user's 1–5 star rating for one of the pilot's features. Returns the refreshed
+// personal + shared numbers so the UI can update in place.
+participantRouter.put(
+  "/pilots/:id/features/:featureId/rating",
+  asyncHandler(async (req, res) => {
+    await requireMembership(req.params.id, req.user!.sub);
+    const { stars } = ratingSchema.parse(req.body);
+
+    const pilot = await prisma.pilot.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, applicationId: true, allFeatures: true },
+    });
+    if (!pilot) throw new HttpError(404, "Pilot not found");
+
+    // Only features this pilot is actually testing can be rated.
+    const piloted = await pilotedFeatureIds(pilot);
+    if (!piloted.has(req.params.featureId)) {
+      throw new HttpError(404, "That feature isn't part of this pilot");
+    }
+
+    await prisma.featureRating.upsert({
+      where: {
+        pilotId_featureId_userId: {
+          pilotId: pilot.id,
+          featureId: req.params.featureId,
+          userId: req.user!.sub,
+        },
+      },
+      create: { pilotId: pilot.id, featureId: req.params.featureId, userId: req.user!.sub, stars },
+      update: { stars },
+    });
+
+    const agg = await prisma.featureRating.aggregate({
+      where: { pilotId: pilot.id, featureId: req.params.featureId },
+      _avg: { stars: true },
+      _count: { _all: true },
+    });
+    res.json({
+      myRating: stars,
+      avgRating: agg._avg.stars,
+      ratingCount: agg._count._all,
+    });
+  })
+);
+
+/* ------------------------------- Chat --------------------------------- */
+// Every pilot has one group channel shared by its members and the owning PM.
+
+/** The pilot + its owning PM's id, or 404. */
+async function pilotWithOwner(pilotId: string) {
+  const pilot = await prisma.pilot.findUnique({
+    where: { id: pilotId },
+    select: { id: true, application: { select: { ownerId: true } } },
+  });
+  if (!pilot) throw new HttpError(404, "Pilot not found");
+  return { ownerId: pilot.application.ownerId };
+}
+
+// GET /my/pilots/:id/chat — the public group channel (members only).
+participantRouter.get(
+  "/pilots/:id/chat",
+  asyncHandler(async (req, res) => {
+    await requireMembership(req.params.id, req.user!.sub);
+    const { ownerId } = await pilotWithOwner(req.params.id);
+    res.json({ messages: await listPublicChat(req.params.id, req.user!.sub, ownerId) });
+  })
+);
+
+const chatSchema = z
+  .object({
+    body: z.string().max(4000).optional().default(""),
+    anonymous: z.boolean().optional().default(false),
+    commentId: z.string().optional(),
+  })
+  .refine((d) => d.body.trim().length > 0 || d.commentId, {
+    message: "Write a message or share a report",
+  });
+
+// POST /my/pilots/:id/chat — post a message, optionally sharing one of your own
+// reports (commentId). `anonymous` posts under no name (name-only otherwise).
+participantRouter.post(
+  "/pilots/:id/chat",
+  rateLimit({ windowMs: 60 * 1000, max: 30, key: byUser, message: "You're sending messages too fast" }),
+  asyncHandler(async (req, res) => {
+    await requireMembership(req.params.id, req.user!.sub);
+    const { ownerId } = await pilotWithOwner(req.params.id);
+    const { body, anonymous, commentId } = chatSchema.parse(req.body);
+
+    // A shared report must be the poster's own comment on this pilot.
+    if (commentId) {
+      const comment = await prisma.comment.findUnique({ where: { id: commentId } });
+      if (!comment || comment.pilotId !== req.params.id || comment.userId !== req.user!.sub) {
+        throw new HttpError(404, "Report not found");
+      }
+    }
+
+    const created = await prisma.chatMessage.create({
+      data: { pilotId: req.params.id, userId: req.user!.sub, body: body.trim(), anonymous, commentId },
+    });
+    res.status(201).json({ message: await serializeCreated(created.id, req.user!.sub, ownerId) });
+  })
+);
+
+// GET /my/pilots/:id/chat/private — my private thread with the organizer.
+participantRouter.get(
+  "/pilots/:id/chat/private",
+  asyncHandler(async (req, res) => {
+    await requireMembership(req.params.id, req.user!.sub);
+    const { ownerId } = await pilotWithOwner(req.params.id);
+    res.json({ messages: await listPrivateThread(req.params.id, req.user!.sub, req.user!.sub, ownerId) });
+  })
+);
+
+const privateSchema = z.object({ body: z.string().min(1, "Write a message").max(4000) });
+
+// POST /my/pilots/:id/chat/private — send a private message to the organizer.
+participantRouter.post(
+  "/pilots/:id/chat/private",
+  rateLimit({ windowMs: 60 * 1000, max: 30, key: byUser, message: "You're sending messages too fast" }),
+  asyncHandler(async (req, res) => {
+    await requireMembership(req.params.id, req.user!.sub);
+    const { ownerId } = await pilotWithOwner(req.params.id);
+    const { body } = privateSchema.parse(req.body);
+    const created = await prisma.chatMessage.create({
+      data: {
+        pilotId: req.params.id,
+        userId: req.user!.sub,
+        kind: "PRIVATE",
+        threadUserId: req.user!.sub, // the thread is keyed on the participant
+        body: body.trim(),
+      },
+    });
+    res.status(201).json({ message: await serializeCreated(created.id, req.user!.sub, ownerId) });
   })
 );
 
