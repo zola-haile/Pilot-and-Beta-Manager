@@ -1046,6 +1046,21 @@ button.chip-select {
   width: auto;
   margin: 0;
 }
+.chat-attach {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+}
+.chat-attach input {
+  display: none;
+}
+.chat-attach:hover {
+  color: var(--text);
+}
 
 /* Horizontal bar list */
 .barlist {

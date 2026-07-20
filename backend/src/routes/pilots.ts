@@ -18,7 +18,7 @@ import { commentAnalytics, questionRollups, sentimentScore } from "../lib/analyt
 import { pilotedFeatures, pilotedFeatureIds } from "../lib/pilotFeatures";
 import { signUploadPath } from "../lib/uploads";
 import {
-  listPublicChat, listPrivateThread, listPrivateThreads, serializeCreated,
+  listPublicChat, listPrivateThread, listPrivateThreads, serializeCreated, saveChatImages,
 } from "../lib/chat";
 import { buildPilotExport } from "../lib/export";
 
@@ -911,11 +911,16 @@ pilotsRouter.get(
   })
 );
 
-const pmChatSchema = z.object({
-  body: z.string().min(1, "Write a message").max(4000),
-  anonymous: z.boolean().optional().default(false),
-  announcement: z.boolean().optional().default(false),
-});
+const pmChatSchema = z
+  .object({
+    body: z.string().max(4000).optional().default(""),
+    anonymous: z.boolean().optional().default(false),
+    announcement: z.boolean().optional().default(false),
+    images: z.array(z.string()).max(6, "At most 6 images").optional().default([]),
+  })
+  .refine((d) => d.body.trim().length > 0 || d.images.length > 0, {
+    message: "Write a message or attach an image",
+  });
 
 // POST /pilots/:id/chat — post in the channel as the organizer. `announcement`
 // pins it as a highlighted broadcast (never anonymous).
@@ -923,7 +928,8 @@ pilotsRouter.post(
   "/:id/chat",
   asyncHandler(async (req, res) => {
     await getOwnedPilot(req.params.id, req.user!.sub);
-    const { body, anonymous, announcement } = pmChatSchema.parse(req.body);
+    const { body, anonymous, announcement, images } = pmChatSchema.parse(req.body);
+    const urls = await saveChatImages(images);
     const created = await prisma.chatMessage.create({
       data: {
         pilotId: req.params.id,
@@ -931,6 +937,7 @@ pilotsRouter.post(
         body: body.trim(),
         kind: announcement ? "ANNOUNCEMENT" : "PUBLIC",
         anonymous: announcement ? false : anonymous,
+        images: { create: urls.map((url) => ({ url })) },
       },
     });
     res.status(201).json({ message: await serializeCreated(created.id, req.user!.sub, req.user!.sub) });
@@ -960,11 +967,20 @@ pilotsRouter.get(
 );
 
 // POST /pilots/:id/chat/private/:userId — reply to that participant privately.
+const pmPrivateSchema = z
+  .object({
+    body: z.string().max(4000).optional().default(""),
+    images: z.array(z.string()).max(6, "At most 6 images").optional().default([]),
+  })
+  .refine((d) => d.body.trim().length > 0 || d.images.length > 0, {
+    message: "Write a message or attach an image",
+  });
+
 pilotsRouter.post(
   "/:id/chat/private/:userId",
   asyncHandler(async (req, res) => {
     await getOwnedPilot(req.params.id, req.user!.sub);
-    const { body } = z.object({ body: z.string().min(1, "Write a message").max(4000) }).parse(req.body);
+    const { body, images } = pmPrivateSchema.parse(req.body);
 
     // The target must be a participant of this pilot.
     const membership = await prisma.membership.findFirst({
@@ -972,6 +988,7 @@ pilotsRouter.post(
     });
     if (!membership) throw new HttpError(404, "Participant not found in this pilot");
 
+    const urls = await saveChatImages(images);
     const created = await prisma.chatMessage.create({
       data: {
         pilotId: req.params.id,
@@ -979,6 +996,7 @@ pilotsRouter.post(
         kind: "PRIVATE",
         threadUserId: req.params.userId,
         body: body.trim(),
+        images: { create: urls.map((url) => ({ url })) },
       },
     });
     res.status(201).json({ message: await serializeCreated(created.id, req.user!.sub, req.user!.sub) });

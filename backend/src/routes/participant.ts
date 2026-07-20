@@ -11,7 +11,7 @@ import { CommentCategory } from "@prisma/client";
 import { COMMENT_CATEGORIES, CATEGORY_VALUES } from "../lib/comments";
 import { saveDataUrlImage, signUploadPath } from "../lib/uploads";
 import { pilotedFeatures, pilotedFeatureIds } from "../lib/pilotFeatures";
-import { listPublicChat, listPrivateThread, serializeCreated } from "../lib/chat";
+import { listPublicChat, listPrivateThread, serializeCreated, saveChatImages } from "../lib/chat";
 
 export const participantRouter = Router();
 
@@ -301,9 +301,10 @@ const chatSchema = z
     body: z.string().max(4000).optional().default(""),
     anonymous: z.boolean().optional().default(false),
     commentId: z.string().optional(),
+    images: z.array(z.string()).max(6, "At most 6 images").optional().default([]),
   })
-  .refine((d) => d.body.trim().length > 0 || d.commentId, {
-    message: "Write a message or share a report",
+  .refine((d) => d.body.trim().length > 0 || d.commentId || d.images.length > 0, {
+    message: "Write a message, share a report, or attach an image",
   });
 
 // POST /my/pilots/:id/chat — post a message, optionally sharing one of your own
@@ -314,7 +315,7 @@ participantRouter.post(
   asyncHandler(async (req, res) => {
     await requireMembership(req.params.id, req.user!.sub);
     const { ownerId } = await pilotWithOwner(req.params.id);
-    const { body, anonymous, commentId } = chatSchema.parse(req.body);
+    const { body, anonymous, commentId, images } = chatSchema.parse(req.body);
 
     // A shared report must be the poster's own comment on this pilot.
     if (commentId) {
@@ -324,8 +325,16 @@ participantRouter.post(
       }
     }
 
+    const urls = await saveChatImages(images);
     const created = await prisma.chatMessage.create({
-      data: { pilotId: req.params.id, userId: req.user!.sub, body: body.trim(), anonymous, commentId },
+      data: {
+        pilotId: req.params.id,
+        userId: req.user!.sub,
+        body: body.trim(),
+        anonymous,
+        commentId,
+        images: { create: urls.map((url) => ({ url })) },
+      },
     });
     res.status(201).json({ message: await serializeCreated(created.id, req.user!.sub, ownerId) });
   })
@@ -341,7 +350,14 @@ participantRouter.get(
   })
 );
 
-const privateSchema = z.object({ body: z.string().min(1, "Write a message").max(4000) });
+const privateSchema = z
+  .object({
+    body: z.string().max(4000).optional().default(""),
+    images: z.array(z.string()).max(6, "At most 6 images").optional().default([]),
+  })
+  .refine((d) => d.body.trim().length > 0 || d.images.length > 0, {
+    message: "Write a message or attach an image",
+  });
 
 // POST /my/pilots/:id/chat/private — send a private message to the organizer.
 participantRouter.post(
@@ -350,7 +366,8 @@ participantRouter.post(
   asyncHandler(async (req, res) => {
     await requireMembership(req.params.id, req.user!.sub);
     const { ownerId } = await pilotWithOwner(req.params.id);
-    const { body } = privateSchema.parse(req.body);
+    const { body, images } = privateSchema.parse(req.body);
+    const urls = await saveChatImages(images);
     const created = await prisma.chatMessage.create({
       data: {
         pilotId: req.params.id,
@@ -358,6 +375,7 @@ participantRouter.post(
         kind: "PRIVATE",
         threadUserId: req.user!.sub, // the thread is keyed on the participant
         body: body.trim(),
+        images: { create: urls.map((url) => ({ url })) },
       },
     });
     res.status(201).json({ message: await serializeCreated(created.id, req.user!.sub, ownerId) });

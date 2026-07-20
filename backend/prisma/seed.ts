@@ -281,6 +281,74 @@ async function main() {
     },
   });
 
+  // --- Feature star-ratings on Beta v2 (participants rate the piloted features) ---
+  async function rate(userId: string, featureId: string, stars: number) {
+    await prisma.featureRating.create({ data: { pilotId: beta.id, userId, featureId, stars } });
+  }
+  await rate(uma.userId!, features[0].id, 3); // Checkout button
+  await rate(uma.userId!, features[1].id, 5); // Search bar
+  await rate(uma.userId!, features[3].id, 4); // Payment page
+  await rate(raj.userId!, features[0].id, 2);
+  await rate(raj.userId!, features[3].id, 5);
+  await rate(ana.userId!, features[0].id, 4);
+  await rate(ana.userId!, features[1].id, 4);
+
+  // --- Pilot chat: group channel, an announcement, a shared report, and a
+  //     private thread between Uma and the PM ---
+  async function chat(
+    userId: string,
+    body: string,
+    opts: {
+      kind?: "PUBLIC" | "ANNOUNCEMENT" | "PRIVATE";
+      anonymous?: boolean;
+      threadUserId?: string;
+      commentId?: string;
+      at: Date;
+    }
+  ) {
+    await prisma.chatMessage.create({
+      data: {
+        pilotId: beta.id,
+        userId,
+        body,
+        kind: opts.kind ?? "PUBLIC",
+        anonymous: opts.anonymous ?? false,
+        threadUserId: opts.threadUserId ?? null,
+        commentId: opts.commentId ?? null,
+        createdAt: opts.at,
+      },
+    });
+  }
+
+  // Public group channel (+ one PM announcement, one anonymous message, one shared report).
+  await chat(pm.id, "Welcome to the Beta v2 channel! Drop questions and feedback here.", {
+    kind: "ANNOUNCEMENT",
+    at: daysFromNow(-6),
+  });
+  await chat(uma.userId!, "Is anyone else seeing the checkout button get cut off on mobile?", { at: daysFromNow(-5) });
+  await chat(raj.userId!, "Yeah, same on my Pixel — switching to desktop worked.", { at: daysFromNow(-5) });
+  await chat(uma.userId!, "Sharing my report so it's on everyone's radar 👇", {
+    commentId: umaComment.id,
+    at: daysFromNow(-4),
+  });
+  await chat(ana.userId!, "Honestly the search is great though — credit where it's due.", {
+    anonymous: true,
+    at: daysFromNow(-4),
+  });
+  await chat(pm.id, "Thanks all — a sticky checkout button is planned for next sprint.", { at: daysFromNow(-3) });
+
+  // Private one-to-one thread between Uma and the PM.
+  await chat(uma.userId!, "Quick one — could I get a few extra days to finish testing?", {
+    kind: "PRIVATE",
+    threadUserId: uma.userId!,
+    at: daysFromNow(-2),
+  });
+  await chat(pm.id, "Of course, take an extra week. Thanks for the thorough feedback!", {
+    kind: "PRIVATE",
+    threadUserId: uma.userId!,
+    at: daysFromNow(-2),
+  });
+
   console.log("Done.");
   console.log("  PM login:            pm@test.com / password123  (2 apps: CheckoutApp, MobileApp)");
   console.log("  Company admin login: admin@cp.com / adminpass123");

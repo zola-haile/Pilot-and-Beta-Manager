@@ -1,0 +1,298 @@
+===============================================================================
+ PILOT PROGRAM MANAGER — SECURITY & SCALING NOTES
+ Path to a real-world, multi-user deployment
+ Last updated: 2026-07-20
+===============================================================================
+
+PURPOSE
+-------
+An honest, code-grounded assessment of (1) the security posture and (2) what it
+takes to run this app for many concurrent users across more than one server
+instance. Items are marked with a priority:
+
+  [P0] Blocks a real public launch (do before any external user touches it)
+  [P1] Needed to serve many users / run more than one instance
+  [P2] Scale, hardening, and polish for growth
+
+Stack today: Express + TypeScript + Prisma + PostgreSQL (backend), React + Vite
+(frontend), deployed separately. Auth is stateless JWT (Authorization header).
+
+
+===============================================================================
+ PART A — WHAT IS ALREADY DONE WELL (baseline to protect, do not regress)
+===============================================================================
+- Multi-tenancy is real: every PM query is ownership-scoped
+  (getOwnedPilot / getOwnedApplication / getOwnedCompany), participant routes
+  gated by requireMembership. Tenants cannot read each other's data.
+- Passwords: bcrypt hashing; a weak-password stop-list on registration.
+- Sessions: JWT carries a tokenVersion; bumping it revokes every old token
+  (used on role change). Auth middleware verifies it against the DB per request.
+- Email verification required before email-scoped privileged actions.
+- Uploads are access-controlled: images are served only via HMAC-signed,
+  expiring URLs minted inside authenticated responses (blocks hot-linking and
+  path traversal via a strict filename regex).
+- Input validation via zod on request bodies.
+- Prod secret enforcement: the server refuses to boot in production without
+  JWT_SECRET (config.ts requiredSecret).
+- Rate limiting on auth + chat + comment endpoints.
+- Chat anonymity is absolute (anonymous author is never revealed, even to the PM
+  or in exports).
+
+Keep all of the above intact through every change below.
+
+
+===============================================================================
+ PART B — SECURITY CONCERNS
+===============================================================================
+
+--- B1. Transport, proxy & HTTP headers ---------------------------------------
+[P0] No `app.set("trust proxy", ...)`. Behind a load balancer/CDN, req.ip is the
+     proxy IP, so IP-based rate limiting buckets ALL users together and client
+     IPs are wrong in logs. Set trust proxy to the hop count / proxy CIDR.
+[P0] Enforce HTTPS everywhere (terminate TLS at the LB/CDN; redirect HTTP->HTTPS;
+     send HSTS). JWTs in headers over plain HTTP are sniffable.
+[P0] No security headers. Add `helmet`: HSTS, X-Content-Type-Options,
+     X-Frame-Options/frame-ancestors, Referrer-Policy, and a Content-Security-
+     Policy for the frontend. (The frontend origin is separate, so CSP lives on
+     the web app, but set API response headers too.)
+[P1] Uploaded files are served by the API with res.sendFile. Add
+     `Content-Disposition: attachment` (or `X-Content-Type-Options: nosniff`) so
+     a malicious upload can't be rendered inline as HTML/SVG in the API origin.
+     Better: serve media from a separate storage domain (see C2).
+
+--- B2. Authentication & sessions ---------------------------------------------
+[P1] JWTs live 7 days with no refresh/rotation. A stolen token is valid until it
+     expires or tokenVersion is bumped (which logs the user out everywhere).
+     Add short-lived access tokens + rotating refresh tokens, or per-session
+     records, so one device can be revoked without nuking all sessions.
+[P1] No account lockout / backoff beyond fixed-window rate limiting. Add
+     exponential backoff or temporary lockout after repeated failed logins.
+[P2] No MFA/2FA. Offer TOTP at least for PM/admin accounts.
+[P2] CSRF risk is currently LOW because auth is via Authorization header, not
+     cookies. If you ever move the token to a cookie, add CSRF protection and
+     SameSite/secure flags.
+
+--- B3. Authorization / tenancy ------------------------------------------------
+[P1] Tenancy is enforced per-query by convention. As routes multiply, one missed
+     ownership check leaks data. Add: (a) a standard test suite that asserts
+     cross-tenant access returns 404/403 for every route, (b) consider a query
+     helper / Prisma middleware that always injects the owner scope.
+[P2] No org/team model — a PM is a solo owner. Multiple PMs sharing a project
+     requires an Organization layer (see PART D). Until then, teams can't
+     collaborate, which also limits least-privilege within a customer.
+
+--- B4. Secrets & configuration -----------------------------------------------
+[P0] Manage secrets in a real secret store (cloud secrets manager / platform env
+     vars), never in the repo. Rotate JWT_SECRET on a schedule and on suspected
+     compromise (rotation invalidates all tokens — plan a re-login window).
+[P1] Separate secrets per environment (dev/staging/prod). Ensure the dev JWT
+     fallback ("dev-secret-change-me") can NEVER be reachable in prod (it can't
+     today due to requiredSecret, but keep that guard).
+
+--- B5. File uploads ----------------------------------------------------------
+[P0] Images arrive as base64 data URLs inside a 12 MB JSON body
+     (express.json limit in index.ts). This (a) inflates payloads ~33%, (b) holds
+     whole files in memory, (c) is a DoS vector (many large bodies). Move to
+     presigned direct-to-object-storage uploads (see C2).
+[P1] Validate real content, not just the data-URL prefix: check magic bytes,
+     re-encode/strip metadata (EXIF), cap dimensions, and scan for malware if
+     users are external. Enforce per-user upload quotas.
+[P1] Local disk (backend/uploads) is not durable and not shared across instances
+     (see C2) — also a data-loss risk on container restart.
+
+--- B6. Input handling & injection --------------------------------------------
+[P1] SQL injection risk is low (Prisma parameterizes). Audit any raw queries if
+     added later.
+[P1] Stored XSS: participant/PM text (comments, chat, names) is rendered in the
+     React SPA. React escapes by default, but confirm nothing uses
+     dangerouslySetInnerHTML, and sanitize if you ever render markdown/HTML.
+[P2] Add a global request body size cap smaller than 12 MB for non-upload routes;
+     large JSON everywhere is unnecessary once uploads move to storage.
+
+--- B7. Rate limiting & abuse -------------------------------------------------
+[P1] The limiter is IN-MEMORY (a per-process Map, middleware/rateLimit.ts). With
+     more than one instance each process counts separately, so real limits are
+     Nx too loose. Move to a shared store (Redis) — see C3.
+[P1] Add global per-IP and per-account limits (not just per-route), plus limits
+     on expensive endpoints (export, analytics, AI, chat polling).
+[P2] Add bot/abuse protection on public endpoints (register, join, invite
+     preview): CAPTCHA or a challenge after thresholds.
+
+--- B8. Email & account enumeration -------------------------------------------
+[P0] Email transport is "console" (lib/email.ts) — NO real emails are sent.
+     Invites and verification links only print to the server log. Wire a real
+     provider (SES/SendGrid/Postmark) before launch or no external user can
+     onboard. Configure SPF/DKIM/DMARC.
+[P1] Registration is already non-enumerating (generic responses). Keep that
+     property when adding real email; also rate-limit resend-verification and
+     password-reset (password reset flow itself still needs building).
+
+--- B9. Privacy, PII & data governance ----------------------------------------
+[P0] This is real partner-company feedback (names, emails, opinions). Before
+     external use: a privacy policy, data-processing terms, defined retention,
+     and per-tenant data export/delete (GDPR/CCPA "right to be forgotten").
+[P1] Chat anonymity must survive every new feature and any AI/integration path —
+     never send anonymous authorship to a third party (Productboard, an LLM) in
+     a way that can re-identify. Strip identity before it leaves the server.
+[P1] Encrypt data at rest (DB + object storage) and in transit. Minimize PII in
+     logs (no tokens, no emails in log lines).
+
+--- B10. Logging, audit & monitoring ------------------------------------------
+[P1] No structured logging or audit trail. Add request logging with correlation
+     IDs (pino) and an audit log for security-relevant actions (login, role
+     change, invite, delete, export, admin claim).
+[P1] Add error tracking (Sentry) and alerting on 5xx spikes, auth failures, and
+     rate-limit trips.
+
+--- B11. Dependencies & supply chain ------------------------------------------
+[P1] Add automated dependency scanning (npm audit / Dependabot / Snyk) in CI and
+     pin/lock versions. Review third-party additions for provenance.
+
+--- B12. Backups & disaster recovery ------------------------------------------
+[P0] Automated, tested DB backups with point-in-time recovery; documented restore
+     procedure. Back up object storage too. An untested backup is not a backup.
+
+
+===============================================================================
+ PART C — SCALING TO MANY USERS / MULTIPLE INSTANCES
+===============================================================================
+
+--- C1. Statelessness & horizontal scaling ------------------------------------
+[P1] The API is nearly stateless (JWT auth needs no server session — good). The
+     ONLY per-process state is the in-memory rate-limit buckets + their cleanup
+     timer. Remove that dependency (C3) and you can run N identical instances
+     behind a load balancer and autoscale on CPU/RPS.
+[P1] Set trust proxy (see B1) so instances behind the LB see real client IPs.
+
+--- C2. File storage -> object storage ----------------------------------------
+[P1] Replace local-disk uploads with S3 / Cloudflare R2 / GCS:
+       - Client requests a presigned PUT URL from the API, uploads directly to
+         storage (bytes never transit your API — removes the 12 MB body path).
+       - Store the object key; serve reads via presigned GET or a signed CDN URL
+         (your existing HMAC-signing concept maps cleanly onto this).
+       - Generate thumbnails async (a job or an image CDN).
+     This makes uploads durable, shared across instances, and CDN-cacheable.
+
+--- C3. Shared rate limiting & ephemeral state --------------------------------
+[P1] Move rate-limit buckets to Redis (or a managed limiter). Same for any future
+     ephemeral counters. Redis becomes your shared cache/limiter/pubsub backbone.
+
+--- C4. Database ---------------------------------------------------------------
+[P1] Connection pooling: Prisma opens a pool per instance; N instances x pool can
+     exhaust Postgres connections. Put PgBouncer (or the platform's pooler) in
+     front; size pools to the DB's max_connections.
+[P1] Use real migrations in prod: `prisma migrate deploy` (versioned, reviewable)
+     rather than `prisma db push`. Gate migrations in CI/CD.
+[P2] Indexing: audit hot query paths (feedback lists, chat by pilot, analytics,
+     memberships). Some indexes exist (chat has @@index on pilotId/createdAt);
+     add composite indexes where the workspace filters (status/priority/feature/
+     company/date).
+[P2] N+1 patterns: e.g. the project-level export loops buildPilotExport per pilot
+     sequentially, and a few handlers loop awaited queries. Batch with `in`
+     queries / groupBy, and parallelize independent reads.
+[P2] Read replicas: route heavy read-only work (analytics, exports, dashboards)
+     to a replica; keep writes on primary.
+[P2] Archive/partition high-growth tables (chat messages, comments, submissions)
+     as data accumulates.
+
+--- C5. Per-request auth cost -------------------------------------------------
+[P2] authenticate() hits the DB on EVERY request (to check tokenVersion). At high
+     RPS that's real load. Cache tokenVersion per user in Redis with a short TTL,
+     or accept a small revocation delay and verify less often. Measure first.
+
+--- C6. Real-time chat --------------------------------------------------------
+[P1] Chat currently POLLS every 8s per open panel per user. With hundreds of
+     concurrent chatters that is a flood of authenticated GETs, each running DB
+     queries. Options, cheapest first:
+       - Server-Sent Events (SSE) for one-way push of new messages.
+       - WebSockets (Socket.IO) for bidirectional, with a Redis adapter so
+         sockets work across instances.
+       - A managed realtime service (Ably/Pusher) if you don't want to run it.
+     Back it with Redis pub/sub so any instance can fan out a new message.
+[P2] Add pagination / lazy history load for long threads (don't fetch all
+     messages every poll).
+
+--- C7. Background jobs & async work ------------------------------------------
+[P1] Introduce a job queue (BullMQ on Redis, or a hosted queue). Move off the
+     request path: email sending, export generation, image thumbnailing, AI
+     synthesis, digests/notifications, webhook/Productboard pushes. Add retries
+     with backoff and a dead-letter queue.
+
+--- C8. Caching ----------------------------------------------------------------
+[P2] Cache expensive, read-heavy responses (analytics rollups, feature lists,
+     pilot metadata) in Redis with sensible TTLs and explicit invalidation on
+     write. Add HTTP caching headers/ETags where safe.
+
+--- C9. Frontend & media delivery ---------------------------------------------
+[P1] Serve the Vite build from a CDN (static hosting) — it already deploys
+     separately. Long-cache hashed assets.
+[P2] Serve images through a CDN with signed URLs; add responsive sizes/thumbs.
+
+--- C10. Observability & operations -------------------------------------------
+[P1] Metrics (RPS, latency, error rate, DB pool saturation, queue depth) via
+     OpenTelemetry/Prometheus + dashboards. Health/readiness probes (there is a
+     /health endpoint already — add readiness that checks DB + Redis).
+[P1] Centralized logs with correlation IDs; error tracking (Sentry).
+[P2] Load testing (k6/Artillery) against staging to find the first bottleneck
+     (likely DB connections or chat polling) before users do.
+
+--- C11. Deployment topology ---------------------------------------------------
+[P1] Target shape for "many users":
+       Client -> CDN (frontend + media)
+       Client -> LB/API gateway (TLS, WAF, rate-limit edge)
+              -> N stateless API containers (autoscaled)
+              -> PgBouncer -> Postgres (primary + read replica)
+              -> Redis (cache, rate-limit, pub/sub, queues)
+              -> Object storage (uploads) + image CDN
+              -> Worker containers (queue consumers)
+       Email/SMS provider, error tracking, metrics/logs sinks.
+[P1] Zero-downtime deploys: rolling/blue-green, run `migrate deploy` as a gated
+     step, keep migrations backward-compatible for the overlap window.
+
+
+===============================================================================
+ PART D — STRUCTURAL / PRODUCT SCALING
+===============================================================================
+[P2] Organization/Team model: introduce an Org that owns Applications and
+     Companies, with multiple PM members and roles (owner/admin/member). This is
+     the single biggest change for selling to real companies and for
+     least-privilege within a tenant. Migrate current "PM owns everything" under
+     an implicit single-member org to avoid a breaking change.
+[P2] SSO / SAML / SCIM for enterprise customers.
+[P2] Per-tenant configuration, plans/billing, and usage limits.
+[P2] Public feedback portal + close-the-loop (notify testers when their idea
+     ships) — engagement features that also drive retention.
+
+
+===============================================================================
+ PART E — SUGGESTED SEQUENCING
+===============================================================================
+MINIMUM TO GO LIVE (P0):
+  1. Real email provider (+ SPF/DKIM/DMARC) — nothing works without it.
+  2. HTTPS everywhere + trust proxy + helmet security headers.
+  3. Object storage for uploads (kills the base64/local-disk problems) OR, as a
+     stopgap for a single instance, keep local disk but add a persistent volume
+     and disposition/nosniff headers.
+  4. Secrets in a managed store; automated, tested DB backups.
+  5. Privacy policy + data retention + tenant delete/export.
+  6. Password-reset flow (currently missing).
+
+MULTI-INSTANCE / MANY USERS (P1):
+  7. Redis: shared rate limiter + cache + pub/sub.
+  8. Presigned direct uploads + CDN media.
+  9. Realtime chat (SSE/WebSockets) to replace polling.
+ 10. Job queue for email/exports/AI/notifications.
+ 11. PgBouncer + `prisma migrate deploy` + read replica for analytics.
+ 12. Structured logging, audit log, error tracking, metrics, readiness probes.
+ 13. Refresh-token rotation + login backoff/lockout.
+
+SCALE & GROWTH (P2):
+ 14. Org/team model, SSO, billing.
+ 15. Query/index tuning, N+1 cleanup, caching, load testing.
+ 16. Per-session revocation, MFA, tenant-isolation test suite.
+
+===============================================================================
+ Bottom line: the app is already correct multi-tenant software. The gap to
+ "real-world, many users" is operational hardening (email, storage, Redis,
+ realtime, observability) plus an org/team model — additive work, not a rewrite.
+===============================================================================

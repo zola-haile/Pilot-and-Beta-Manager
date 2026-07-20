@@ -1,11 +1,19 @@
 import { prisma } from "../prisma";
-import { signUploadPath } from "./uploads";
+import { signUploadPath, saveDataUrlImage } from "./uploads";
 
-// How a chat message is loaded from the DB (author + optional shared report).
+// How a chat message is loaded from the DB (author + optional shared report + attachments).
 const messageInclude = {
   user: { select: { id: true, name: true } },
   comment: { include: { features: true, images: true } },
+  images: true,
 } as const;
+
+/** Persist up to 6 data-URL images for a chat message; returns their public paths. */
+export async function saveChatImages(images: string[]): Promise<string[]> {
+  const urls: string[] = [];
+  for (const dataUrl of images.slice(0, 6)) urls.push(await saveDataUrlImage(dataUrl));
+  return urls;
+}
 
 type LoadedMessage = Awaited<
   ReturnType<typeof prisma.chatMessage.findFirstOrThrow<{ include: typeof messageInclude }>>
@@ -26,6 +34,7 @@ export interface ChatMessageView {
   isOrganizer: boolean; // posted by the pilot's PM (only when not anonymous)
   isMine: boolean; // posted by the viewer
   report: ChatReportView | null; // a shared report snapshot, if any
+  images: { id: string; url: string }[]; // image attachments (signed URLs)
 }
 
 /**
@@ -59,6 +68,7 @@ export function serializeMessage(
           images: m.comment.images.map((i) => ({ id: i.id, url: signUploadPath(i.url) })),
         }
       : null,
+    images: m.images.map((i) => ({ id: i.id, url: signUploadPath(i.url) })),
   };
 }
 

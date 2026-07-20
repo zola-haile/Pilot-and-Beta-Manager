@@ -359,10 +359,20 @@ model ChatMessage {
   anonymous    Boolean  @default(false)
   commentId    String? // set when this message shares a report
   comment      Comment? @relation(fields: [commentId], references: [id], onDelete: SetNull)
+  images       ChatImage[]
   createdAt    DateTime @default(now())
 
   @@index([pilotId, createdAt])
   @@index([pilotId, threadUserId])
+}
+
+// An image attachment on a chat message (same pipeline as CommentImage).
+model ChatImage {
+  id            String      @id @default(cuid())
+  chatMessageId String
+  chatMessage   ChatMessage @relation(fields: [chatMessageId], references: [id], onDelete: Cascade)
+  url           String // served from /uploads (signed)
+  createdAt     DateTime    @default(now())
 }
 
 // A private PM annotation on a comment — never shown to participants.

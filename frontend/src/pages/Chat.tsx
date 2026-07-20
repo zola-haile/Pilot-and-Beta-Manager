@@ -17,6 +17,31 @@ export interface ChatMessage {
   isOrganizer: boolean;
   isMine: boolean;
   report: ChatReport | null;
+  images: { id: string; url: string }[];
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function Thumbs({ images }: { images: { id: string; url: string }[] }) {
+  if (images.length === 0) return null;
+  return (
+    <div className="thumb-row">
+      {images.map((img) => (
+        <div key={img.id} className="thumb">
+          <a href={assetUrl(img.url)} target="_blank" rel="noreferrer">
+            <img src={assetUrl(img.url)} alt="attachment" />
+          </a>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 interface ChatPanelProps {
@@ -43,6 +68,7 @@ export function ChatPanel({
   const [body, setBody] = useState("");
   const [anonymous, setAnonymous] = useState(false);
   const [announce, setAnnounce] = useState(false);
+  const [images, setImages] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -71,9 +97,16 @@ export function ChatPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [basePath]);
 
+  async function onPickImages(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // allow re-picking the same file
+    const dataUrls = await Promise.all(files.map(readFileAsDataUrl));
+    setImages((prev) => [...prev, ...dataUrls].slice(0, 6));
+  }
+
   async function send(e: FormEvent) {
     e.preventDefault();
-    if (!body.trim()) return;
+    if (!body.trim() && images.length === 0) return;
     setError(null);
     setBusy(true);
     try {
@@ -81,11 +114,13 @@ export function ChatPanel({
         method: "POST",
         body: {
           body,
+          images,
           ...(allowAnonymous ? { anonymous: announce ? false : anonymous } : {}),
           ...(allowAnnouncement ? { announcement: announce } : {}),
         },
       });
       setBody("");
+      setImages([]);
       setAnnounce(false);
       await load(true);
     } catch (err: any) {
@@ -120,8 +155,28 @@ export function ChatPanel({
           placeholder={announce ? "Write an announcement for everyone…" : "Write a message…"}
           rows={2}
         />
+        {images.length > 0 && (
+          <div className="thumb-row" style={{ marginTop: 8 }}>
+            {images.map((src, i) => (
+              <div key={i} className="thumb">
+                <img src={src} alt="" />
+                <button
+                  type="button"
+                  className="remove"
+                  onClick={() => setImages((prev) => prev.filter((_, j) => j !== i))}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="spread" style={{ marginTop: 8 }}>
           <div className="row" style={{ gap: 16 }}>
+            <label className="chat-attach" title="Attach images (up to 6)">
+              <input type="file" accept="image/*" multiple onChange={onPickImages} />
+              <span>📎 Attach</span>
+            </label>
             {allowAnonymous && (
               <label className="chat-anon">
                 <input
@@ -140,7 +195,7 @@ export function ChatPanel({
               </label>
             )}
           </div>
-          <button type="submit" disabled={busy || !body.trim()}>
+          <button type="submit" disabled={busy || (!body.trim() && images.length === 0)}>
             {busy ? "Sending…" : announce ? "Announce" : "Send"}
           </button>
         </div>
@@ -158,7 +213,8 @@ function ChatBubble({ message: m }: { message: ChatMessage }) {
           {m.authorName && <span className="muted">· {m.authorName}</span>}
           <span className="chat-time">{new Date(m.createdAt).toLocaleString()}</span>
         </div>
-        <p className="chat-text" style={{ marginTop: 6 }}>{m.body}</p>
+        {m.body && <p className="chat-text" style={{ marginTop: 6 }}>{m.body}</p>}
+        <Thumbs images={m.images} />
       </div>
     );
   }
@@ -171,6 +227,7 @@ function ChatBubble({ message: m }: { message: ChatMessage }) {
           <span className="chat-time">{new Date(m.createdAt).toLocaleString()}</span>
         </div>
         {m.body && <p className="chat-text">{m.body}</p>}
+        <Thumbs images={m.images} />
         {m.report && (
           <div className="chat-report">
             <span className="badge category-badge">{categoryLabel(m.report.category)}</span>
