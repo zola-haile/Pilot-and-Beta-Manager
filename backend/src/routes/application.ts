@@ -16,6 +16,7 @@ import { CommentStatus, CommentPriority } from "@prisma/client";
 import { commentAnalytics, sentimentScore, weekStart } from "../lib/analytics";
 import { signUploadPath } from "../lib/uploads";
 import { buildPilotExport } from "../lib/export";
+import { Actor, canManage, ownedByWhere } from "../lib/authz";
 
 const OPEN_STATUSES = ["NEW", "TRIAGED", "PLANNED", "IN_PROGRESS"];
 
@@ -24,17 +25,25 @@ const OPEN_STATUSES = ["NEW", "TRIAGED", "PLANNED", "IN_PROGRESS"];
 export const applicationRouter = Router();
 const pm = [authenticate, requireRole("PM")];
 
-/** Loads an application owned by the current user, or throws 404. */
-export async function getOwnedApplication(appId: string, ownerId: string) {
-  const app = await prisma.application.findUnique({ where: { id: appId } });
-  if (!app || app.ownerId !== ownerId) throw new HttpError(404, "Application not found");
+/** Loads an application the actor may manage (owns it, or oversees its org). */
+export async function getOwnedApplication(appId: string, actor: Actor) {
+  const app = await prisma.application.findUnique({
+    where: { id: appId },
+    include: { owner: { select: { organizationId: true } } },
+  });
+  if (!app || !canManage(actor, app.ownerId, app.owner.organizationId)) {
+    throw new HttpError(404, "Application not found");
+  }
   return app;
 }
 
-/** Loads a company owned by the current user, or throws 404. */
-async function getOwnedCompany(companyId: string, ownerId: string) {
-  const company = await prisma.company.findUnique({ where: { id: companyId } });
-  if (!company || company.ownerId !== ownerId) {
+/** Loads a company the actor may manage (owns it, or oversees its org). */
+async function getOwnedCompany(companyId: string, actor: Actor) {
+  const company = await prisma.company.findUnique({
+    where: { id: companyId },
+    include: { owner: { select: { organizationId: true } } },
+  });
+  if (!company || !canManage(actor, company.ownerId, company.owner.organizationId)) {
     throw new HttpError(404, "Company not found");
   }
   return company;
@@ -60,9 +69,12 @@ applicationRouter.get(
   pm,
   asyncHandler(async (req, res) => {
     const apps = await prisma.application.findMany({
-      where: { ownerId: req.user!.sub },
+      where: ownedByWhere(req.user!),
       orderBy: { createdAt: "asc" },
-      include: { _count: { select: { pilots: true } } },
+      include: {
+        _count: { select: { pilots: true } },
+        owner: { select: { id: true, name: true, email: true } },
+      },
     });
     res.json({
       applications: apps.map((a) => ({
@@ -71,6 +83,10 @@ applicationRouter.get(
         description: a.description,
         createdAt: a.createdAt,
         counts: { pilots: a._count.pilots },
+        // Who runs this project — surfaced so org overseers can tell projects
+        // apart. `mine` lets the UI hide the label for the viewer's own work.
+        owner: { id: a.owner.id, name: a.owner.name, email: a.owner.email },
+        mine: a.ownerId === req.user!.sub,
       })),
     });
   })
@@ -101,7 +117,7 @@ applicationRouter.get(
   "/applications/:appId",
   pm,
   asyncHandler(async (req, res) => {
-    const app = await getOwnedApplication(req.params.appId, req.user!.sub);
+    const app = await getOwnedApplication(req.params.appId, req.user!);
     res.json({ application: { id: app.id, name: app.name, description: app.description } });
   })
 );
@@ -111,7 +127,7 @@ applicationRouter.get(
   "/applications/:appId/export",
   pm,
   asyncHandler(async (req, res) => {
-    const app = await getOwnedApplication(req.params.appId, req.user!.sub);
+    const app = await getOwnedApplication(req.params.appId, req.user!);
     const pilots = await prisma.pilot.findMany({
       where: { applicationId: app.id },
       select: { id: true },
@@ -132,7 +148,7 @@ applicationRouter.patch(
   "/applications/:appId",
   pm,
   asyncHandler(async (req, res) => {
-    const app = await getOwnedApplication(req.params.appId, req.user!.sub);
+    const app = await getOwnedApplication(req.params.appId, req.user!);
     const data = upsertAppSchema.partial().parse(req.body);
     const updated = await prisma.application.update({
       where: { id: app.id },
@@ -150,7 +166,7 @@ applicationRouter.delete(
   "/applications/:appId",
   pm,
   asyncHandler(async (req, res) => {
-    const app = await getOwnedApplication(req.params.appId, req.user!.sub);
+    const app = await getOwnedApplication(req.params.appId, req.user!);
     await prisma.application.delete({ where: { id: app.id } }); // cascades pilots, companies, etc.
     res.status(204).end();
   })
@@ -164,9 +180,12 @@ applicationRouter.get(
   pm,
   asyncHandler(async (req, res) => {
     const companies = await prisma.company.findMany({
-      where: { ownerId: req.user!.sub },
+      where: ownedByWhere(req.user!),
       orderBy: { name: "asc" },
-      include: { _count: { select: { participants: true } } },
+      include: {
+        _count: { select: { participants: true } },
+        owner: { select: { id: true, name: true, email: true } },
+      },
     });
     res.json({
       companies: companies.map((c) => ({
@@ -175,6 +194,8 @@ applicationRouter.get(
         adminEmail: c.adminEmail,
         adminJoined: c.adminUserId !== null,
         participantCount: c._count.participants,
+        owner: { id: c.owner.id, name: c.owner.name, email: c.owner.email },
+        mine: c.ownerId === req.user!.sub,
       })),
     });
   })
@@ -216,7 +237,7 @@ applicationRouter.patch(
   "/companies/:id",
   pm,
   asyncHandler(async (req, res) => {
-    const company = await getOwnedCompany(req.params.id, req.user!.sub);
+    const company = await getOwnedCompany(req.params.id, req.user!);
     const data = patchCompanySchema.parse(req.body);
     const updated = await prisma.company.update({
       where: { id: company.id },
@@ -234,13 +255,13 @@ applicationRouter.delete(
   "/companies/:id",
   pm,
   asyncHandler(async (req, res) => {
-    const company = await getOwnedCompany(req.params.id, req.user!.sub);
+    const company = await getOwnedCompany(req.params.id, req.user!);
     const participants = await prisma.participant.findMany({
       where: { companyId: company.id },
       select: { userId: true },
     });
     const userIds = participants.map((p) => p.userId).filter(Boolean) as string[];
-    await deletePmSubmissionsForUsers(req.user!.sub, userIds);
+    await deletePmSubmissionsForUsers(company.ownerId, userIds);
     await prisma.company.delete({ where: { id: company.id } }); // cascades participants + memberships
     res.status(204).end();
   })
@@ -252,7 +273,7 @@ applicationRouter.post(
   "/companies/:id/invite-admin",
   pm,
   asyncHandler(async (req, res) => {
-    const company = await getOwnedCompany(req.params.id, req.user!.sub);
+    const company = await getOwnedCompany(req.params.id, req.user!);
     const inviter = await prisma.user.findUnique({ where: { id: req.user!.sub } });
     const base = config.appUrl.replace(/\/$/, "");
     if (company.adminUserId) {
@@ -285,13 +306,16 @@ applicationRouter.delete(
   asyncHandler(async (req, res) => {
     const participant = await prisma.participant.findUnique({
       where: { id: req.params.id },
-      include: { company: true },
+      include: { company: { include: { owner: { select: { organizationId: true } } } } },
     });
-    if (!participant || participant.company.ownerId !== req.user!.sub) {
+    if (
+      !participant ||
+      !canManage(req.user!, participant.company.ownerId, participant.company.owner.organizationId)
+    ) {
       throw new HttpError(404, "Person not found");
     }
     if (participant.userId) {
-      await deletePmSubmissionsForUsers(req.user!.sub, [participant.userId]);
+      await deletePmSubmissionsForUsers(participant.company.ownerId, [participant.userId]);
     }
     await prisma.participant.delete({ where: { id: participant.id } }); // cascades memberships
     res.status(204).end();
@@ -303,7 +327,7 @@ applicationRouter.get(
   "/companies/:id",
   pm,
   asyncHandler(async (req, res) => {
-    const company = await getOwnedCompany(req.params.id, req.user!.sub);
+    const company = await getOwnedCompany(req.params.id, req.user!);
     const full = await prisma.company.findUnique({
       where: { id: company.id },
       include: {
@@ -371,7 +395,7 @@ applicationRouter.get(
   "/applications/:appId/pilots",
   pm,
   asyncHandler(async (req, res) => {
-    const app = await getOwnedApplication(req.params.appId, req.user!.sub);
+    const app = await getOwnedApplication(req.params.appId, req.user!);
     const pilots = await prisma.pilot.findMany({
       where: { applicationId: app.id },
       orderBy: { createdAt: "desc" },
@@ -418,7 +442,7 @@ applicationRouter.post(
   "/applications/:appId/pilots",
   pm,
   asyncHandler(async (req, res) => {
-    const app = await getOwnedApplication(req.params.appId, req.user!.sub);
+    const app = await getOwnedApplication(req.params.appId, req.user!);
     const data = createPilotSchema.parse(req.body);
 
     // When a subset is chosen, keep only features that belong to this app.
@@ -450,13 +474,13 @@ applicationRouter.post(
 
 /* ------------------ Features (app-level, PM-managed) ------------------ */
 
-/** Loads a feature whose application is owned by the current user, or throws. */
-async function getOwnedFeature(featureId: string, ownerId: string) {
+/** Loads a feature whose application the actor may manage, or throws. */
+async function getOwnedFeature(featureId: string, actor: Actor) {
   const feature = await prisma.feature.findUnique({
     where: { id: featureId },
-    include: { application: true },
+    include: { application: { include: { owner: { select: { organizationId: true } } } } },
   });
-  if (!feature || feature.application.ownerId !== ownerId) {
+  if (!feature || !canManage(actor, feature.application.ownerId, feature.application.owner.organizationId)) {
     throw new HttpError(404, "Feature not found");
   }
   return feature;
@@ -467,7 +491,7 @@ applicationRouter.get(
   "/applications/:appId/features",
   pm,
   asyncHandler(async (req, res) => {
-    const app = await getOwnedApplication(req.params.appId, req.user!.sub);
+    const app = await getOwnedApplication(req.params.appId, req.user!);
     const features = await prisma.feature.findMany({
       where: { applicationId: app.id },
       orderBy: { name: "asc" },
@@ -494,7 +518,7 @@ applicationRouter.post(
   "/applications/:appId/features",
   pm,
   asyncHandler(async (req, res) => {
-    const app = await getOwnedApplication(req.params.appId, req.user!.sub);
+    const app = await getOwnedApplication(req.params.appId, req.user!);
     const { name, description } = featureSchema.parse(req.body);
     const feature = await prisma.feature.create({
       data: { applicationId: app.id, name, description: description ?? null },
@@ -510,7 +534,7 @@ applicationRouter.patch(
   "/features/:id",
   pm,
   asyncHandler(async (req, res) => {
-    await getOwnedFeature(req.params.id, req.user!.sub);
+    await getOwnedFeature(req.params.id, req.user!);
     const data = featureSchema.partial().parse(req.body);
     const feature = await prisma.feature.update({
       where: { id: req.params.id },
@@ -528,7 +552,7 @@ applicationRouter.delete(
   "/features/:id",
   pm,
   asyncHandler(async (req, res) => {
-    await getOwnedFeature(req.params.id, req.user!.sub);
+    await getOwnedFeature(req.params.id, req.user!);
     await prisma.feature.delete({ where: { id: req.params.id } });
     res.status(204).end();
   })
@@ -536,13 +560,13 @@ applicationRouter.delete(
 
 /* ------------------ Themes (app-level feedback insights) -------------- */
 
-/** Loads a theme whose application is owned by the current user, or throws. */
-async function getOwnedTheme(themeId: string, ownerId: string) {
+/** Loads a theme whose application the actor may manage, or throws. */
+async function getOwnedTheme(themeId: string, actor: Actor) {
   const theme = await prisma.theme.findUnique({
     where: { id: themeId },
-    include: { application: true },
+    include: { application: { include: { owner: { select: { organizationId: true } } } } },
   });
-  if (!theme || theme.application.ownerId !== ownerId) {
+  if (!theme || !canManage(actor, theme.application.ownerId, theme.application.owner.organizationId)) {
     throw new HttpError(404, "Theme not found");
   }
   return theme;
@@ -554,7 +578,7 @@ applicationRouter.get(
   "/applications/:appId/themes",
   pm,
   asyncHandler(async (req, res) => {
-    const app = await getOwnedApplication(req.params.appId, req.user!.sub);
+    const app = await getOwnedApplication(req.params.appId, req.user!);
     const themes = await prisma.theme.findMany({
       where: { applicationId: app.id },
       orderBy: { createdAt: "desc" },
@@ -581,7 +605,7 @@ applicationRouter.post(
   "/applications/:appId/themes",
   pm,
   asyncHandler(async (req, res) => {
-    const app = await getOwnedApplication(req.params.appId, req.user!.sub);
+    const app = await getOwnedApplication(req.params.appId, req.user!);
     const { name, description } = themeSchema.parse(req.body);
     const theme = await prisma.theme.create({
       data: { applicationId: app.id, name, description: description ?? null },
@@ -597,7 +621,7 @@ applicationRouter.patch(
   "/themes/:id",
   pm,
   asyncHandler(async (req, res) => {
-    await getOwnedTheme(req.params.id, req.user!.sub);
+    await getOwnedTheme(req.params.id, req.user!);
     const data = themeSchema.partial().parse(req.body);
     const theme = await prisma.theme.update({
       where: { id: req.params.id },
@@ -615,7 +639,7 @@ applicationRouter.delete(
   "/themes/:id",
   pm,
   asyncHandler(async (req, res) => {
-    await getOwnedTheme(req.params.id, req.user!.sub);
+    await getOwnedTheme(req.params.id, req.user!);
     await prisma.theme.delete({ where: { id: req.params.id } });
     res.status(204).end();
   })
@@ -630,7 +654,7 @@ applicationRouter.get(
   "/applications/:appId/comments",
   pm,
   asyncHandler(async (req, res) => {
-    const app = await getOwnedApplication(req.params.appId, req.user!.sub);
+    const app = await getOwnedApplication(req.params.appId, req.user!);
 
     const comments = await prisma.comment.findMany({
       where: { pilot: { applicationId: app.id } },
@@ -693,7 +717,7 @@ applicationRouter.get(
   "/applications/:appId/analytics",
   pm,
   asyncHandler(async (req, res) => {
-    const app = await getOwnedApplication(req.params.appId, req.user!.sub);
+    const app = await getOwnedApplication(req.params.appId, req.user!);
 
     const comments = await prisma.comment.findMany({
       where: { pilot: { applicationId: app.id } },
@@ -839,7 +863,7 @@ applicationRouter.patch(
   "/applications/:appId/comments/bulk",
   pm,
   asyncHandler(async (req, res) => {
-    const app = await getOwnedApplication(req.params.appId, req.user!.sub);
+    const app = await getOwnedApplication(req.params.appId, req.user!);
     const data = bulkSchema.parse(req.body);
 
     // Every target must be a comment in one of this app's pilots.

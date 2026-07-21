@@ -109,7 +109,7 @@ export function CompaniesPage() {
             <Link key={c.id} to={`/companies/${c.id}`} className="card card-link">
               <div className="spread">
                 <div>
-                  <h2 style={{ margin: 0 }}>🏢 {c.name}</h2>
+                  <h2 style={{ margin: 0 }}>{c.name}</h2>
                   <div className="muted" style={{ fontSize: 13, marginTop: 2 }}>
                     Admin: {c.adminEmail}{" "}
                     <span className={`badge ${c.adminJoined ? "badge-accepted" : "badge-invited"}`}>
@@ -209,7 +209,7 @@ export function CompanyDetailPage() {
       </Link>
       {error && <div className="alert alert-error" style={{ marginTop: 10 }}>{error}</div>}
       <div className="spread" style={{ marginTop: 10 }}>
-        <h1 style={{ margin: 0 }}>🏢 {data.company.name}</h1>
+        <h1 style={{ margin: 0 }}>{data.company.name}</h1>
         <button className="btn-danger btn-sm" onClick={deleteCompany}>
           Delete company
         </button>

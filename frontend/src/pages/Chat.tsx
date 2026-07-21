@@ -60,7 +60,7 @@ export function ChatPanel({
   basePath,
   heading = "Pilot chat",
   blurb = "Everyone in this pilot is here — ask for clarification, compare notes, or share a report.",
-  emptyText = "No messages yet. Say hello 👋",
+  emptyText = "No messages yet.",
   allowAnonymous = true,
   allowAnnouncement = false,
 }: ChatPanelProps) {
@@ -132,9 +132,7 @@ export function ChatPanel({
 
   return (
     <div className="card composer tone-talk" style={{ marginTop: 16 }}>
-      <h2 style={{ margin: 0 }}>
-        <span style={{ marginRight: 8 }}>💬</span>{heading}
-      </h2>
+      <h2 style={{ margin: 0 }}>{heading}</h2>
       <p className="muted" style={{ marginTop: 4 }}>{blurb}</p>
       {error && <div className="alert alert-error">{error}</div>}
 
@@ -175,7 +173,7 @@ export function ChatPanel({
           <div className="row" style={{ gap: 16 }}>
             <label className="chat-attach" title="Attach images (up to 6)">
               <input type="file" accept="image/*" multiple onChange={onPickImages} />
-              <span>📎 Attach</span>
+              <span>Attach</span>
             </label>
             {allowAnonymous && (
               <label className="chat-anon">
@@ -191,7 +189,7 @@ export function ChatPanel({
             {allowAnnouncement && (
               <label className="chat-anon">
                 <input type="checkbox" checked={announce} onChange={(e) => setAnnounce(e.target.checked)} />
-                <span>📣 Post as announcement</span>
+                <span>Post as announcement</span>
               </label>
             )}
           </div>
@@ -209,7 +207,7 @@ function ChatBubble({ message: m }: { message: ChatMessage }) {
     return (
       <div className="chat-announce">
         <div className="chat-announce__head">
-          <span>📣 Announcement</span>
+          <span>Announcement</span>
           {m.authorName && <span className="muted">· {m.authorName}</span>}
           <span className="chat-time">{new Date(m.createdAt).toLocaleString()}</span>
         </div>

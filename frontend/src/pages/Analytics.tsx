@@ -219,15 +219,15 @@ function Dashboard({ data }: { data: AnalyticsData }) {
       {/* Leaderboards */}
       <div className="grid-3">
         <div className="card">
-          <h3 style={{ marginBottom: 10 }}>🚀 Top requests</h3>
+          <h3 style={{ marginBottom: 10 }}>Top requests</h3>
           <BarList items={data.leaderboards.requested.map((x) => ({ label: x.name, value: x.count, color: categoryColor("FEATURE_REQUEST") }))} emptyText="No requests yet." />
         </div>
         <div className="card">
-          <h3 style={{ marginBottom: 10 }}>🐞 Most-reported bugs</h3>
+          <h3 style={{ marginBottom: 10 }}>Most-reported bugs</h3>
           <BarList items={data.leaderboards.bugs.map((x) => ({ label: x.name, value: x.count, color: categoryColor("BUG") }))} emptyText="No bugs reported." />
         </div>
         <div className="card">
-          <h3 style={{ marginBottom: 10 }}>💚 Most praised</h3>
+          <h3 style={{ marginBottom: 10 }}>Most praised</h3>
           <BarList items={data.leaderboards.praised.map((x) => ({ label: x.name, value: x.count, color: categoryColor("PRAISE") }))} emptyText="No praise yet." />
         </div>
       </div>

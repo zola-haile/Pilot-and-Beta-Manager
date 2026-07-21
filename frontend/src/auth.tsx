@@ -1,12 +1,16 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { api, getToken, setToken } from "./api";
 
+export type OrgRole = "OWNER" | "ADMIN" | "MEMBER";
+
 export interface User {
   id: string;
   email: string;
   name: string | null;
   role: "PM" | "COMPANY_ADMIN" | "PARTICIPANT";
   emailVerified: boolean;
+  organizationId?: string | null;
+  orgRole?: OrgRole;
 }
 
 interface AuthState {

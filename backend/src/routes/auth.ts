@@ -7,8 +7,9 @@ import { signToken } from "../lib/jwt";
 import { asyncHandler, HttpError } from "../lib/http";
 import { authenticate } from "../middleware/auth";
 import { rateLimit } from "../middleware/rateLimit";
-import { sendEmail, verifyEmail } from "../lib/email";
+import { sendEmail, verifyEmail, orgInviteEmail } from "../lib/email";
 import { config } from "../config";
+import { OrgRole } from "@prisma/client";
 
 export const authRouter = Router();
 
@@ -26,10 +27,20 @@ type UserRecord = {
   role: "PM" | "COMPANY_ADMIN" | "PARTICIPANT";
   tokenVersion: number;
   emailVerifiedAt: Date | null;
+  organizationId: string | null;
+  orgRole: OrgRole;
 };
 
 function publicUser(u: UserRecord) {
-  return { id: u.id, email: u.email, name: u.name, role: u.role, emailVerified: u.emailVerifiedAt !== null };
+  return {
+    id: u.id,
+    email: u.email,
+    name: u.name,
+    role: u.role,
+    emailVerified: u.emailVerifiedAt !== null,
+    organizationId: u.organizationId,
+    orgRole: u.orgRole,
+  };
 }
 
 function issueToken(u: UserRecord): string {
@@ -53,6 +64,8 @@ const registerSchema = z.object({
   // PMs run pilots; participants test. Either way the email must be verified
   // before it can act on email-scoped resources (invites, admin seats).
   role: z.enum(["PM", "PARTICIPANT"]).default("PM"),
+  // A PM signing up creates their own organization (they become its owner).
+  organizationName: z.string().min(1).max(120).optional(),
 });
 
 // POST /auth/register — create an account and email a verification link. Always
@@ -62,12 +75,15 @@ authRouter.post(
   "/register",
   rateLimit({ windowMs: 60 * 60 * 1000, max: 10, message: "Too many sign-up attempts, try again later" }),
   asyncHandler(async (req, res) => {
-    const { email, password, name, role } = registerSchema.parse(req.body);
+    const { email, password, name, role, organizationName } = registerSchema.parse(req.body);
     assertStrongPassword(password, email);
 
     const existing = await prisma.user.findUnique({ where: { email } });
     if (!existing) {
       const { verifyToken, verifyTokenExpiresAt } = freshVerifyToken();
+      // A new PM owns a fresh organization; participants have none.
+      const orgName =
+        organizationName?.trim() || (name ? `${name}'s organization` : "My organization");
       await prisma.user.create({
         data: {
           email,
@@ -76,6 +92,9 @@ authRouter.post(
           passwordHash: await hashPassword(password),
           verifyToken,
           verifyTokenExpiresAt,
+          ...(role === "PM"
+            ? { orgRole: "OWNER", organization: { create: { name: orgName } } }
+            : {}),
         },
       });
       await sendVerification(email, verifyToken);
@@ -321,6 +340,93 @@ authRouter.post(
     }
 
     await prisma.company.update({ where: { id: company.id }, data: { adminUserId: user.id } });
+
+    res.json({ token: issueToken(user), user: publicUser(user) });
+  })
+);
+
+/* ---------------------- Organization (PM) invitations ------------------- */
+
+// GET /auth/org-invitations/:token — preview a PM's invite to join an org.
+authRouter.get(
+  "/org-invitations/:token",
+  asyncHandler(async (req, res) => {
+    const invite = await prisma.orgInvite.findUnique({
+      where: { token: req.params.token },
+      include: { organization: { select: { name: true } } },
+    });
+    if (!invite) throw new HttpError(404, "Invitation not found");
+    const existingUser = await prisma.user.findUnique({ where: { email: invite.email } });
+    res.json({
+      organization: { name: invite.organization.name },
+      email: invite.email,
+      role: invite.role,
+      accepted: invite.acceptedAt !== null,
+      accountExists: Boolean(existingUser?.passwordHash),
+    });
+  })
+);
+
+const orgAcceptSchema = z.object({
+  password: z.string().min(8, "Password must be at least 8 characters").optional(),
+  name: z.string().min(1).optional(),
+});
+
+// POST /auth/org-invitations/:token/accept — join the organization as a PM.
+// Creates or activates the account, links it to the org with the invited role,
+// and single-uses the invite.
+authRouter.post(
+  "/org-invitations/:token/accept",
+  asyncHandler(async (req, res) => {
+    const { password, name } = orgAcceptSchema.parse(req.body);
+    const invite = await prisma.orgInvite.findUnique({ where: { token: req.params.token } });
+    if (!invite) throw new HttpError(404, "Invitation not found");
+    if (invite.acceptedAt) throw new HttpError(410, "This invitation has already been used");
+
+    let user = await prisma.user.findUnique({ where: { email: invite.email } });
+
+    const orgLink = {
+      role: "PM" as const,
+      organizationId: invite.organizationId,
+      orgRole: invite.role,
+    };
+
+    if (!user) {
+      if (!password) throw new HttpError(400, "A password is required to create your account");
+      assertStrongPassword(password, invite.email);
+      user = await prisma.user.create({
+        data: {
+          email: invite.email,
+          name: name ?? null,
+          passwordHash: await hashPassword(password),
+          emailVerifiedAt: new Date(), // the emailed token proves inbox control
+          ...orgLink,
+        },
+      });
+    } else if (!user.passwordHash) {
+      if (!password) throw new HttpError(400, "A password is required to activate your account");
+      assertStrongPassword(password, invite.email);
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          passwordHash: await hashPassword(password),
+          name: name ?? user.name,
+          emailVerifiedAt: user.emailVerifiedAt ?? new Date(),
+          ...orgLink,
+        },
+      });
+    } else {
+      // Existing, active account joins the org (moving from any prior org).
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { emailVerifiedAt: user.emailVerifiedAt ?? new Date(), ...orgLink },
+      });
+    }
+
+    await prisma.orgInvite.update({
+      where: { id: invite.id },
+      data: { acceptedAt: new Date(), token: randomBytes(24).toString("hex") },
+    });
 
     res.json({ token: issueToken(user), user: publicUser(user) });
   })

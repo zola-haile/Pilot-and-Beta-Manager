@@ -1,4 +1,4 @@
-// Pilot Program Manager — data model
+// Pilotboard — data model
 // Run `npm run prisma:migrate` (or db push) to create/update the database.
 //
 // Hierarchy:
@@ -23,6 +23,43 @@ enum Role {
   PM
   COMPANY_ADMIN
   PARTICIPANT
+}
+
+// A PM's standing within their Organization. OWNER is the person who created it;
+// OWNER and ADMIN both have org-wide oversight (see every member's projects).
+// MEMBER only sees their own work. Only OWNER/ADMIN can invite or remove PMs.
+enum OrgRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+// A vendor workspace that groups the PMs (the product team) running pilots.
+// Many PMs can belong to one org; each runs their own projects, while org
+// owners/admins get oversight across everyone's work.
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+
+  members User[]      @relation("OrgMembers")
+  invites OrgInvite[]
+}
+
+// A pending invitation for a PM to join an Organization, by email. Single-use:
+// accepting it links the account to the org and marks it accepted.
+model OrgInvite {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  email          String
+  role           OrgRole      @default(MEMBER)
+  token          String       @unique @default(cuid())
+  invitedByName  String?
+  acceptedAt     DateTime?
+  createdAt      DateTime     @default(now())
+
+  @@unique([organizationId, email])
 }
 
 enum QuestionType {
@@ -54,6 +91,12 @@ model User {
   verifyTokenExpiresAt DateTime?
   // Bumped to invalidate every previously issued JWT for this user (revocation).
   tokenVersion         Int       @default(0)
+
+  // Org membership (PMs only). A PM belongs to one Organization and holds a role
+  // within it; participants and company admins have no org.
+  organizationId String?
+  organization   Organization? @relation("OrgMembers", fields: [organizationId], references: [id])
+  orgRole        OrgRole       @default(MEMBER)
 
   applications        Application[] @relation("AppOwner") // a PM can own many applications
   companies           Company[]     @relation("CompanyOwner") // companies this PM manages (top-level)

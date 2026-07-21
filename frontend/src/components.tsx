@@ -39,7 +39,7 @@ export function Layout({ children }: { children: ReactNode }) {
       <div className="topbar">
         <div className="row" style={{ gap: 24 }}>
           <Link to="/" className="brand">
-            🚀 Pilot Manager
+            Pilotboard
           </Link>
           {user?.role === "PM" && (
             <nav className="row" style={{ gap: 16 }}>
@@ -48,6 +48,9 @@ export function Layout({ children }: { children: ReactNode }) {
               </NavLink>
               <NavLink to="/companies" className={({ isActive }) => (isActive ? "nav-active" : "nav-link")}>
                 Companies
+              </NavLink>
+              <NavLink to="/team" className={({ isActive }) => (isActive ? "nav-active" : "nav-link")}>
+                Team
               </NavLink>
             </nav>
           )}

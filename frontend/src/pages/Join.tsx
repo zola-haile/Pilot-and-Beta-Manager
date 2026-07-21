@@ -61,7 +61,7 @@ export function JoinPage() {
   return (
     <div className="center-screen">
       <div className="card container-narrow" style={{ width: "100%" }}>
-        <h1>Join the pilot 🎉</h1>
+        <h1>Join the pilot</h1>
         <p className="muted" style={{ marginTop: 0 }}>
           Join <b>{preview.pilot.name}</b> as a participant from <b>{preview.company.name}</b>.
         </p>

@@ -21,6 +21,7 @@ import {
   listPublicChat, listPrivateThread, listPrivateThreads, serializeCreated, saveChatImages,
 } from "../lib/chat";
 import { buildPilotExport } from "../lib/export";
+import { Actor, canManage } from "../lib/authz";
 
 const OPEN_STATUSES = ["NEW", "TRIAGED", "PLANNED", "IN_PROGRESS"];
 
@@ -31,13 +32,13 @@ export const pilotsRouter = Router();
 // All routes here require an authenticated PM.
 pilotsRouter.use(authenticate, requireRole("PM"));
 
-/** Loads a pilot in the current PM's application or throws 404. */
-async function getOwnedPilot(pilotId: string, ownerId: string) {
+/** Loads a pilot the actor may manage (owns its project, or oversees its org). */
+async function getOwnedPilot(pilotId: string, actor: Actor) {
   const pilot = await prisma.pilot.findUnique({
     where: { id: pilotId },
-    include: { application: true },
+    include: { application: { include: { owner: { select: { organizationId: true } } } } },
   });
-  if (!pilot || pilot.application.ownerId !== ownerId) {
+  if (!pilot || !canManage(actor, pilot.application.ownerId, pilot.application.owner.organizationId)) {
     throw new HttpError(404, "Pilot not found");
   }
   return pilot;
@@ -77,7 +78,7 @@ const upsertPilotSchema = z.object({
 pilotsRouter.get(
   "/:id",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    await getOwnedPilot(req.params.id, req.user!);
     const pilot = await prisma.pilot.findUnique({
       where: { id: req.params.id },
       include: {
@@ -112,6 +113,16 @@ pilotsRouter.get(
 
     const features = await pilotedFeatures(pilot);
 
+    // Roll up participants' 1–5 star ratings per feature, so the PM sees the
+    // same signal that's otherwise only in the export.
+    const ratingRows = await prisma.featureRating.groupBy({
+      by: ["featureId"],
+      where: { pilotId: pilot.id },
+      _avg: { stars: true },
+      _count: { _all: true },
+    });
+    const ratingByFeature = new Map(ratingRows.map((r) => [r.featureId, r]));
+
     res.json({
       pilot: {
         id: pilot.id,
@@ -123,7 +134,16 @@ pilotsRouter.get(
         createdAt: pilot.createdAt,
         status: pilotStatus(pilot.startDate, pilot.endDate),
         allFeatures: pilot.allFeatures,
-        features: features.map((f) => ({ id: f.id, name: f.name, description: f.description })),
+        features: features.map((f) => {
+          const r = ratingByFeature.get(f.id);
+          return {
+            id: f.id,
+            name: f.name,
+            description: f.description,
+            avgRating: r?._avg.stars ?? null,
+            ratingCount: r?._count._all ?? 0,
+          };
+        }),
         questions: pilot.questions,
         companies: pilot.pilotCompanies.map((pc) => ({
           id: pc.id,
@@ -155,7 +175,7 @@ pilotsRouter.get(
 pilotsRouter.patch(
   "/:id",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    await getOwnedPilot(req.params.id, req.user!);
     const data = upsertPilotSchema.partial().parse(req.body);
     const pilot = await prisma.pilot.update({
       where: { id: req.params.id },
@@ -178,7 +198,7 @@ pilotsRouter.patch(
 pilotsRouter.delete(
   "/:id",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    await getOwnedPilot(req.params.id, req.user!);
     await prisma.pilot.delete({ where: { id: req.params.id } });
     res.status(204).end();
   })
@@ -196,7 +216,7 @@ const setFeaturesSchema = z.object({
 pilotsRouter.put(
   "/:id/features",
   asyncHandler(async (req, res) => {
-    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
     const { allFeatures, featureIds } = setFeaturesSchema.parse(req.body);
 
     // Resolve the effective set of feature ids after this change.
@@ -270,7 +290,7 @@ async function assertFeaturePiloted(
 pilotsRouter.post(
   "/:id/questions",
   asyncHandler(async (req, res) => {
-    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
     const data = questionSchema.parse(req.body);
     await assertFeaturePiloted(pilot, data.featureId);
     const max = await prisma.question.aggregate({
@@ -297,7 +317,7 @@ pilotsRouter.post(
 pilotsRouter.patch(
   "/:id/questions/:qid",
   asyncHandler(async (req, res) => {
-    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
     const data = questionSchema.partial().parse(req.body);
     const existing = await prisma.question.findUnique({ where: { id: req.params.qid } });
     if (!existing || existing.pilotId !== req.params.id) {
@@ -324,7 +344,7 @@ pilotsRouter.patch(
 pilotsRouter.delete(
   "/:id/questions/:qid",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    await getOwnedPilot(req.params.id, req.user!);
     const existing = await prisma.question.findUnique({ where: { id: req.params.qid } });
     if (!existing || existing.pilotId !== req.params.id) {
       throw new HttpError(404, "Question not found");
@@ -350,8 +370,10 @@ const inviteSchema = z.object({
 pilotsRouter.post(
   "/:id/invitations",
   asyncHandler(async (req, res) => {
-    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
-    const ownerId = req.user!.sub;
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
+    // Companies belong to the PM who owns the project — resolve/create against
+    // them, not the acting user (which may be an org overseer).
+    const ownerId = pilot.application.ownerId;
     const { email, name, companyId, companyName, companyAdminEmail, sendEmail: shouldSend } =
       inviteSchema.parse(req.body);
 
@@ -421,7 +443,7 @@ pilotsRouter.post(
 pilotsRouter.post(
   "/:id/invitations/:mid/resend",
   asyncHandler(async (req, res) => {
-    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
     const membership = await prisma.membership.findUnique({
       where: { id: req.params.mid },
       include: { participant: true },
@@ -442,7 +464,7 @@ pilotsRouter.post(
 pilotsRouter.delete(
   "/:id/invitations/:mid",
   asyncHandler(async (req, res) => {
-    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
     const membership = await prisma.membership.findUnique({ where: { id: req.params.mid } });
     if (!membership || membership.pilotId !== pilot.id) {
       throw new HttpError(404, "Invitation not found");
@@ -489,10 +511,10 @@ const addCompanySchema = z.object({ companyId: z.string() });
 pilotsRouter.post(
   "/:id/companies",
   asyncHandler(async (req, res) => {
-    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
     const { companyId } = addCompanySchema.parse(req.body);
     const company = await prisma.company.findUnique({ where: { id: companyId } });
-    if (!company || company.ownerId !== req.user!.sub) {
+    if (!company || company.ownerId !== pilot.application.ownerId) {
       throw new HttpError(404, "Company not found");
     }
     const existing = await prisma.pilotCompany.findUnique({
@@ -523,7 +545,7 @@ pilotsRouter.post(
 pilotsRouter.delete(
   "/:id/companies/:pcId",
   asyncHandler(async (req, res) => {
-    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
     const pc = await prisma.pilotCompany.findUnique({ where: { id: req.params.pcId } });
     if (!pc || pc.pilotId !== pilot.id) throw new HttpError(404, "Not found");
     await prisma.pilotCompany.delete({ where: { id: pc.id } });
@@ -535,7 +557,7 @@ pilotsRouter.delete(
 pilotsRouter.post(
   "/:id/companies/:pcId/resend",
   asyncHandler(async (req, res) => {
-    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
     const pc = await prisma.pilotCompany.findUnique({
       where: { id: req.params.pcId },
       include: { company: true },
@@ -554,7 +576,7 @@ pilotsRouter.post(
 pilotsRouter.get(
   "/:id/responses",
   asyncHandler(async (req, res) => {
-    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
     const submissions = await prisma.submission.findMany({
       where: { pilotId: req.params.id, submittedAt: { not: null } },
       orderBy: { submittedAt: "desc" },
@@ -590,7 +612,7 @@ pilotsRouter.get(
 pilotsRouter.delete(
   "/:id/responses/:sid",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    await getOwnedPilot(req.params.id, req.user!);
     const submission = await prisma.submission.findUnique({ where: { id: req.params.sid } });
     if (!submission || submission.pilotId !== req.params.id) {
       throw new HttpError(404, "Response not found");
@@ -607,7 +629,7 @@ pilotsRouter.delete(
 pilotsRouter.get(
   "/:id/comments",
   asyncHandler(async (req, res) => {
-    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
     const comments = await prisma.comment.findMany({
       where: { pilotId: req.params.id },
       orderBy: { createdAt: "desc" },
@@ -674,7 +696,7 @@ const patchCommentSchema = z.object({
 pilotsRouter.patch(
   "/:id/comments/:cid",
   asyncHandler(async (req, res) => {
-    const pilot = await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
     const comment = await prisma.comment.findUnique({ where: { id: req.params.cid } });
     if (!comment || comment.pilotId !== req.params.id) {
       throw new HttpError(404, "Comment not found");
@@ -736,7 +758,7 @@ const noteSchema = z.object({ body: z.string().min(1, "Note can't be empty") });
 pilotsRouter.post(
   "/:id/comments/:cid/notes",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    await getOwnedPilot(req.params.id, req.user!);
     const comment = await prisma.comment.findUnique({ where: { id: req.params.cid } });
     if (!comment || comment.pilotId !== req.params.id) {
       throw new HttpError(404, "Comment not found");
@@ -753,7 +775,7 @@ pilotsRouter.post(
 pilotsRouter.delete(
   "/:id/comments/:cid/notes/:nid",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    await getOwnedPilot(req.params.id, req.user!);
     const note = await prisma.commentNote.findUnique({ where: { id: req.params.nid } });
     if (!note || note.commentId !== req.params.cid) {
       throw new HttpError(404, "Note not found");
@@ -770,7 +792,7 @@ pilotsRouter.delete(
 pilotsRouter.get(
   "/:id/analytics",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    await getOwnedPilot(req.params.id, req.user!);
     const pilotId = req.params.id;
 
     const comments = await prisma.comment.findMany({
@@ -878,7 +900,7 @@ pilotsRouter.get(
 pilotsRouter.delete(
   "/:id/comments/:cid",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    await getOwnedPilot(req.params.id, req.user!);
     const comment = await prisma.comment.findUnique({ where: { id: req.params.cid } });
     if (!comment || comment.pilotId !== req.params.id) {
       throw new HttpError(404, "Comment not found");
@@ -893,7 +915,7 @@ pilotsRouter.delete(
 pilotsRouter.get(
   "/:id/export",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    await getOwnedPilot(req.params.id, req.user!);
     res.json(await buildPilotExport(req.params.id));
   })
 );
@@ -906,8 +928,11 @@ pilotsRouter.get(
 pilotsRouter.get(
   "/:id/chat",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
-    res.json({ messages: await listPublicChat(req.params.id, req.user!.sub, req.user!.sub) });
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
+    // The channel's "organizer" is the PM who owns the project, even when an org
+    // overseer is the one viewing.
+    const ownerPmId = pilot.application.ownerId;
+    res.json({ messages: await listPublicChat(req.params.id, req.user!.sub, ownerPmId) });
   })
 );
 
@@ -927,7 +952,8 @@ const pmChatSchema = z
 pilotsRouter.post(
   "/:id/chat",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
+    const ownerPmId = pilot.application.ownerId;
     const { body, anonymous, announcement, images } = pmChatSchema.parse(req.body);
     const urls = await saveChatImages(images);
     const created = await prisma.chatMessage.create({
@@ -940,7 +966,7 @@ pilotsRouter.post(
         images: { create: urls.map((url) => ({ url })) },
       },
     });
-    res.status(201).json({ message: await serializeCreated(created.id, req.user!.sub, req.user!.sub) });
+    res.status(201).json({ message: await serializeCreated(created.id, req.user!.sub, ownerPmId) });
   })
 );
 
@@ -951,7 +977,7 @@ pilotsRouter.post(
 pilotsRouter.get(
   "/:id/chat/private",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    await getOwnedPilot(req.params.id, req.user!);
     res.json({ threads: await listPrivateThreads(req.params.id) });
   })
 );
@@ -960,9 +986,15 @@ pilotsRouter.get(
 pilotsRouter.get(
   "/:id/chat/private/:userId",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
-    const me = req.user!.sub;
-    res.json({ messages: await listPrivateThread(req.params.id, req.params.userId, me, me) });
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
+    res.json({
+      messages: await listPrivateThread(
+        req.params.id,
+        req.params.userId,
+        req.user!.sub,
+        pilot.application.ownerId
+      ),
+    });
   })
 );
 
@@ -979,7 +1011,7 @@ const pmPrivateSchema = z
 pilotsRouter.post(
   "/:id/chat/private/:userId",
   asyncHandler(async (req, res) => {
-    await getOwnedPilot(req.params.id, req.user!.sub);
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
     const { body, images } = pmPrivateSchema.parse(req.body);
 
     // The target must be a participant of this pilot.
@@ -999,6 +1031,8 @@ pilotsRouter.post(
         images: { create: urls.map((url) => ({ url })) },
       },
     });
-    res.status(201).json({ message: await serializeCreated(created.id, req.user!.sub, req.user!.sub) });
+    res.status(201).json({
+      message: await serializeCreated(created.id, req.user!.sub, pilot.application.ownerId),
+    });
   })
 );

@@ -73,7 +73,6 @@ type ActionKind = "issue" | "idea" | "praise";
 interface ActionSpec {
   kind: ActionKind;
   category: string;
-  icon: string;
   title: string;
   sub: string;
   heading: string;
@@ -85,7 +84,6 @@ const ACTIONS: ActionSpec[] = [
   {
     kind: "issue",
     category: "BUG",
-    icon: "🐞",
     title: "Report an issue",
     sub: "Something broken, confusing, or slow",
     heading: "Report an issue",
@@ -96,7 +94,6 @@ const ACTIONS: ActionSpec[] = [
   {
     kind: "idea",
     category: "FEATURE_REQUEST",
-    icon: "💡",
     title: "Share an idea",
     sub: "Suggest a feature or improvement",
     heading: "Share an idea",
@@ -107,7 +104,6 @@ const ACTIONS: ActionSpec[] = [
   {
     kind: "praise",
     category: "PRAISE",
-    icon: "🎉",
     title: "Give praise",
     sub: "Tell us what's working well",
     heading: "Give praise",
@@ -308,7 +304,7 @@ export function ParticipantFormPage() {
                     onClick={() => (active === a.kind ? setActive(null) : openLane(a.kind))}
                   >
                     {count > 0 && <span className="action-card__badge">{count}</span>}
-                    <span className="action-card__icon">{a.icon}</span>
+                    <span className="action-card__dot" aria-hidden="true" />
                     <span className="action-card__title">{a.title}</span>
                     <span className="action-card__sub">{a.sub}</span>
                   </button>
@@ -346,7 +342,6 @@ export function ParticipantFormPage() {
           <>
             <form className="card composer tone-survey" onSubmit={onSubmit}>
               <h2 style={{ margin: 0 }}>
-                <span style={{ marginRight: 8 }}>📋</span>
                 {history.length > 0 ? "Add a new entry" : "Answer the survey"}
               </h2>
               {history.length > 0 && (
@@ -356,7 +351,7 @@ export function ParticipantFormPage() {
               )}
               {groupQuestions(pilot.questions, features).map((g) => (
                 <div key={g.key} style={{ marginBottom: 8 }}>
-                  {g.title && <div className="feature-heading">🧩 {g.title}</div>}
+                  {g.title && <div className="feature-heading">{g.title}</div>}
                   {g.items.map((q) => (
                     <QuestionField
                       key={q.id}
@@ -619,10 +614,7 @@ function FeedbackComposer({
   return (
     <form className={`card composer tone-${spec.kind}`} onSubmit={submit} style={{ marginTop: 16 }}>
       <div className="spread">
-        <h2 style={{ margin: 0 }}>
-          <span style={{ marginRight: 8 }}>{spec.icon}</span>
-          {spec.heading}
-        </h2>
+        <h2 style={{ margin: 0 }}>{spec.heading}</h2>
         <button type="button" className="btn-ghost btn-sm" onClick={onCancel}>
           Cancel
         </button>
@@ -802,7 +794,7 @@ export function CommentCard({
         ) : (
           <div style={{ marginTop: 12 }}>
             <button className="btn-ghost btn-sm" onClick={() => setSharing(true)}>
-              📣 Report to public chat
+              Report to public chat
             </button>
           </div>
         ))}

@@ -3,19 +3,20 @@ import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth, User } from "../auth";
 
-interface AdminInvitePreview {
-  company: { name: string };
-  adminEmail: string;
-  alreadySetUp: boolean;
+interface OrgInvitePreview {
+  organization: { name: string };
+  email: string;
+  role: "ADMIN" | "MEMBER";
+  accepted: boolean;
   accountExists: boolean;
 }
 
-export function AdminAcceptPage() {
+export function OrgInviteAcceptPage() {
   const { token } = useParams();
   const navigate = useNavigate();
   const { login } = useAuth();
 
-  const [preview, setPreview] = useState<AdminInvitePreview | null>(null);
+  const [preview, setPreview] = useState<OrgInvitePreview | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
@@ -23,7 +24,7 @@ export function AdminAcceptPage() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api<AdminInvitePreview>(`/auth/admin-invitations/${token}`, { auth: false })
+    api<OrgInvitePreview>(`/auth/org-invitations/${token}`, { auth: false })
       .then(setPreview)
       .catch((err) => setLoadError(err.message));
   }, [token]);
@@ -34,11 +35,11 @@ export function AdminAcceptPage() {
     setBusy(true);
     try {
       const res = await api<{ token: string; user: User }>(
-        `/auth/admin-invitations/${token}/accept`,
+        `/auth/org-invitations/${token}/accept`,
         { method: "POST", auth: false, body: preview?.accountExists ? {} : { name, password } }
       );
       login(res.token, res.user);
-      navigate("/admin");
+      navigate("/");
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -58,17 +59,37 @@ export function AdminAcceptPage() {
   }
   if (!preview) return <div className="center-screen">Loading…</div>;
 
+  if (preview.accepted) {
+    return (
+      <div className="center-screen">
+        <div className="card container-narrow" style={{ width: "100%" }}>
+          <h1>Invitation already used</h1>
+          <p className="muted">
+            This invite to <b>{preview.organization.name}</b> has already been accepted. Try signing
+            in instead.
+          </p>
+          <button style={{ width: "100%" }} onClick={() => navigate("/login")}>
+            Go to sign in
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const isAdmin = preview.role === "ADMIN";
+
   return (
     <div className="center-screen">
       <div className="card container-narrow" style={{ width: "100%" }}>
-        <h1>Company admin setup</h1>
+        <h1>Join {preview.organization.name}</h1>
         <p className="muted" style={{ marginTop: 0 }}>
-          You've been made the administrator for <b>{preview.company.name}</b>, as{" "}
-          <b>{preview.adminEmail}</b>.
+          You've been invited to join <b>{preview.organization.name}</b> as a product manager, as{" "}
+          <b>{preview.email}</b>.
         </p>
         <div className="alert alert-info">
-          As admin you can invite your team into pilots (by email or a shareable link) and
-          optionally take part yourself.
+          {isAdmin
+            ? "As an admin you can run your own pilots and oversee the whole team's programs."
+            : "You'll be able to create and run your own pilot programs right away."}
         </div>
         {error && <div className="alert alert-error">{error}</div>}
 
@@ -93,10 +114,10 @@ export function AdminAcceptPage() {
             </>
           )}
           {preview.accountExists && (
-            <p className="muted">You already have an account — accept to take on this admin role.</p>
+            <p className="muted">You already have an account — accept to join this organization.</p>
           )}
           <button type="submit" disabled={busy} style={{ width: "100%" }}>
-            {busy ? "Setting up…" : "Set up admin account"}
+            {busy ? "Joining…" : "Join the team"}
           </button>
         </form>
       </div>

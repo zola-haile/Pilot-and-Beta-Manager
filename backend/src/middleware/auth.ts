@@ -1,15 +1,21 @@
 import { NextFunction, Request, Response } from "express";
+import { OrgRole } from "@prisma/client";
 import { verifyToken, JwtPayload } from "../lib/jwt";
 import { HttpError, asyncHandler } from "../lib/http";
 import { prisma } from "../prisma";
 
 // Augment Express Request with the authenticated user. `verified` reflects the
-// account's current email-verification state (from the DB, not the token).
+// account's current email-verification state (from the DB, not the token), and
+// the org fields carry the PM's current organization + standing for authz.
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
-      user?: JwtPayload & { verified: boolean };
+      user?: JwtPayload & {
+        verified: boolean;
+        organizationId: string | null;
+        orgRole: OrgRole;
+      };
     }
   }
 }
@@ -36,7 +42,15 @@ export const authenticate = asyncHandler(async (req, _res, next) => {
 
   const user = await prisma.user.findUnique({
     where: { id: payload.sub },
-    select: { id: true, email: true, role: true, tokenVersion: true, emailVerifiedAt: true },
+    select: {
+      id: true,
+      email: true,
+      role: true,
+      tokenVersion: true,
+      emailVerifiedAt: true,
+      organizationId: true,
+      orgRole: true,
+    },
   });
   if (!user || user.tokenVersion !== payload.tv) {
     throw new HttpError(401, "Session is no longer valid, please sign in again");
@@ -48,6 +62,8 @@ export const authenticate = asyncHandler(async (req, _res, next) => {
     role: user.role,
     tv: user.tokenVersion,
     verified: user.emailVerifiedAt !== null,
+    organizationId: user.organizationId,
+    orgRole: user.orgRole,
   };
   next();
 });

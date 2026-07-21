@@ -32,6 +32,8 @@ interface PilotFeature {
   id: string;
   name: string;
   description: string | null;
+  avgRating: number | null;
+  ratingCount: number;
 }
 interface Participant {
   id: string;
@@ -130,7 +132,7 @@ export function PilotDetailPage() {
         <div className="row">
           <ExportMenu pilotId={pilot.id} />
           <Link className="btn-ghost btn-sm" to={`/pilots/${pilot.id}/analytics`}>
-            📊 Analytics
+            Analytics
           </Link>
           <button className="btn-danger btn-sm" onClick={deletePilot}>
             Delete pilot
@@ -267,7 +269,7 @@ function ExportMenu({ pilotId }: { pilotId: string }) {
 
   return (
     <div className="export-wrap">
-      <button className="btn-ghost btn-sm" onClick={toggle}>⬇ Export</button>
+      <button className="btn-ghost btn-sm" onClick={toggle}>Export</button>
       {open && (
         <div className="export-menu">
           {busy && <div className="muted" style={{ padding: 8 }}>Preparing…</div>}
@@ -366,7 +368,7 @@ function QuestionsSection({
   if (general.length) groups.push({ key: "__general__", title: "General", items: general });
   for (const f of features) {
     const items = questions.filter((q) => q.featureId === f.id);
-    if (items.length) groups.push({ key: f.id, title: `🧩 ${f.name}`, items });
+    if (items.length) groups.push({ key: f.id, title: `${f.name}`, items });
   }
 
   const renderItem = (q: Question) => (
@@ -479,6 +481,24 @@ function QuestionsSection({
 
 /* --------------------------- Piloted features -------------------------- */
 
+// Read-only star meter: rounds the average to the nearest half and fills stars
+// accordingly. Purely presentational — no interaction.
+function ReadonlyStars({ value }: { value: number | null }) {
+  const rounded = value == null ? 0 : Math.round(value * 2) / 2;
+  return (
+    <span className="stars" aria-label={value == null ? "No ratings" : `${value.toFixed(1)} out of 5`}>
+      {[1, 2, 3, 4, 5].map((n) => {
+        const fill = rounded >= n ? "full" : rounded >= n - 0.5 ? "half" : "empty";
+        return (
+          <span key={n} className={`star-static star-static--${fill}`} aria-hidden="true">
+            ★
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
 interface AppFeature {
   id: string;
   name: string;
@@ -568,11 +588,21 @@ function PilotFeaturesSection({
             <Link to={`/applications/${applicationId}`}>application page</Link>.
           </p>
         ) : (
-          <div className="chip-row">
+          <div className="stack" style={{ gap: 8 }}>
             {features.map((f) => (
-              <span key={f.id} className="chip">
-                🧩 {f.name}
-              </span>
+              <div key={f.id} className="feature-rating-row">
+                <span>{f.name}</span>
+                <span className="feature-rating-row__score">
+                  <ReadonlyStars value={f.avgRating} />
+                  <span className="muted" style={{ fontSize: 13 }}>
+                    {f.ratingCount > 0
+                      ? `${f.avgRating!.toFixed(1)} · ${f.ratingCount} ${
+                          f.ratingCount === 1 ? "rating" : "ratings"
+                        }`
+                      : "No ratings yet"}
+                  </span>
+                </span>
+              </div>
             ))}
           </div>
         )
@@ -696,7 +726,7 @@ function CompaniesInPilotSection({
               <div style={{ minWidth: 0 }}>
                 <div className="row">
                   <Link to={`/companies/${c.company.id}`} style={{ fontWeight: 700 }}>
-                    🏢 {c.company.name}
+                    {c.company.name}
                   </Link>
                   <span className={`badge ${c.adminJoined ? "badge-accepted" : "badge-invited"}`}>
                     admin {c.adminJoined ? "active" : "pending"}
@@ -839,7 +869,7 @@ function ParticipantsSection({
             <div key={cid}>
               <div className="row" style={{ marginBottom: 4 }}>
                 <Link to={`/companies/${cid}`} style={{ fontWeight: 700 }}>
-                  🏢 {g.name}
+                  {g.name}
                 </Link>
                 <span className="muted" style={{ fontSize: 13 }}>
                   {g.people.length} {g.people.length === 1 ? "person" : "people"}

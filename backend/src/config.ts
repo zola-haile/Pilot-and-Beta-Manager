@@ -39,6 +39,6 @@ export const config = {
   appUrl: process.env.APP_URL ?? "http://localhost:5173",
   email: {
     transport: (process.env.EMAIL_TRANSPORT ?? "console") as "console" | "smtp",
-    from: process.env.EMAIL_FROM ?? "Pilot Manager <no-reply@pilots.local>",
+    from: process.env.EMAIL_FROM ?? "Pilotboard <no-reply@pilots.local>",
   },
 };

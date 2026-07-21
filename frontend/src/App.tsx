@@ -11,6 +11,8 @@ import { InviteAcceptPage } from "./pages/InviteAccept";
 import { ParticipantHomePage } from "./pages/ParticipantHome";
 import { ParticipantFormPage } from "./pages/ParticipantForm";
 import { AdminAcceptPage } from "./pages/AdminAccept";
+import { OrgInviteAcceptPage } from "./pages/OrgInviteAccept";
+import { TeamPage } from "./pages/Team";
 import { AdminOverviewPage } from "./pages/AdminOverview";
 import { AdminParticipationPage } from "./pages/AdminParticipation";
 import { JoinPage } from "./pages/Join";
@@ -41,6 +43,7 @@ export default function App() {
       <Route path="/verify/:token" element={<VerifyEmailPage />} />
       <Route path="/invite/:token" element={<InviteAcceptPage />} />
       <Route path="/admin/accept/:token" element={<AdminAcceptPage />} />
+      <Route path="/org/accept/:token" element={<OrgInviteAcceptPage />} />
       <Route path="/join/:token" element={<JoinPage />} />
       <Route
         path="/admin"
@@ -87,6 +90,14 @@ export default function App() {
         element={
           <RequireAuth>
             <AppAnalyticsPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/team"
+        element={
+          <RequireAuth>
+            <TeamPage />
           </RequireAuth>
         }
       />

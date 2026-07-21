@@ -648,10 +648,10 @@ function InboxTable({
                   <a role="button" onClick={() => toggleOpen(c.id)} style={{ cursor: "pointer" }}>
                     {c.body.length > 70 ? `${c.body.slice(0, 70)}…` : c.body}
                   </a>
-                  {c.images.length > 0 && <span title="has images"> 🖼</span>}
+                  {c.images.length > 0 && <span className="muted" title="has images"> · image</span>}
                   {c.duplicateOfId && <span className="muted"> · dup</span>}
-                  {c.duplicateCount > 0 && <span className="muted"> · 🔁{c.duplicateCount}</span>}
-                  {c.theme && <span className="chip" style={{ marginLeft: 6 }}>🔖 {c.theme.name}</span>}
+                  {c.duplicateCount > 0 && <span className="muted"> · {c.duplicateCount} dup</span>}
+                  {c.theme && <span className="chip" style={{ marginLeft: 6 }}>{c.theme.name}</span>}
                 </td>
                 <td className="muted">{c.company ?? "—"}</td>
                 {scope === "app" && (
@@ -765,7 +765,7 @@ function Board({
                     {scope === "app" && c.pilot && (
                       <span className="muted" style={{ fontSize: 12 }}>· {c.pilot.name}</span>
                     )}
-                    {c.images.length > 0 && <span style={{ fontSize: 12 }}>🖼</span>}
+                    {c.images.length > 0 && <span className="muted" style={{ fontSize: 12 }}>image</span>}
                   </div>
                   {c.assignee && (
                     <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
@@ -939,7 +939,7 @@ export function TriagePanel({
 
       {comment.duplicateCount > 0 && (
         <p className="muted" style={{ fontSize: 13, margin: "10px 0 0" }}>
-          🔁 {comment.duplicateCount} other {comment.duplicateCount === 1 ? "comment marks" : "comments mark"} this as
+          {comment.duplicateCount} other {comment.duplicateCount === 1 ? "comment marks" : "comments mark"} this as
           the canonical report.
         </p>
       )}

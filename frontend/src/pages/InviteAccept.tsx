@@ -70,7 +70,7 @@ export function InviteAcceptPage() {
   return (
     <div className="center-screen">
       <div className="card container-narrow" style={{ width: "100%" }}>
-        <h1>You're invited 🎉</h1>
+        <h1>You're invited</h1>
         <p className="muted" style={{ marginTop: 0 }}>
           Join the <b>{preview.pilot.name}</b> pilot as <b>{preview.email}</b>
           {preview.company ? <> from <b>{preview.company}</b></> : null}.

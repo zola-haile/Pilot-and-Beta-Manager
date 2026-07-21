@@ -17,7 +17,7 @@ export async function sendEmail(message: EmailMessage): Promise<void> {
     console.log(
       [
         "",
-        "──────────── ✉️  EMAIL (console transport) ────────────",
+        "──────────── EMAIL (console transport) ────────────",
         `From:    ${config.email.from}`,
         `To:      ${message.to}`,
         `Subject: ${message.subject}`,
@@ -128,12 +128,41 @@ export function adminReminderEmail(params: {
 export function verifyEmail(params: { to: string; verifyUrl: string }): EmailMessage {
   return {
     to: params.to,
-    subject: "Confirm your email for Pilot Manager",
+    subject: "Confirm your email for Pilotboard",
     text: [
-      "Welcome to Pilot Manager! Confirm this email address to activate your account:",
+      "Welcome to Pilotboard! Confirm this email address to activate your account:",
       params.verifyUrl,
       "",
       "This link expires in 24 hours. If you didn't create an account, ignore this email.",
+    ].join("\n"),
+  };
+}
+
+// Sent when an org owner/admin invites another PM to join their organization.
+export function orgInviteEmail(params: {
+  to: string;
+  orgName: string;
+  role: "ADMIN" | "MEMBER";
+  acceptUrl: string;
+  inviterName?: string | null;
+}): EmailMessage {
+  const inviter = params.inviterName ?? "A teammate";
+  const roleLine =
+    params.role === "ADMIN"
+      ? "You'll join as an admin, with oversight of the whole team's pilots."
+      : "You'll join as a member and can run your own pilots.";
+  return {
+    to: params.to,
+    subject: `Join ${params.orgName} on Pilotboard`,
+    text: [
+      `${inviter} invited you to join "${params.orgName}" on Pilotboard as a product manager.`,
+      "",
+      roleLine,
+      "",
+      "Accept the invitation and set up your account here:",
+      params.acceptUrl,
+      "",
+      "If you weren't expecting this, you can ignore this email.",
     ].join("\n"),
   };
 }

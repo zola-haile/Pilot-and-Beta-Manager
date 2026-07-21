@@ -42,7 +42,7 @@ export function AdminOverviewPage() {
                 <div>
                   <h2 style={{ margin: 0 }}>{p.pilot.name}</h2>
                   <div className="muted" style={{ fontSize: 13, marginTop: 2 }}>
-                    🏢 {p.company.name}
+                    {p.company.name}
                   </div>
                 </div>
                 <StatusBadge status={p.pilot.status} />

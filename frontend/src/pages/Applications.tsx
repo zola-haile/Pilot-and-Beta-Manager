@@ -10,6 +10,8 @@ interface AppSummary {
   name: string;
   description: string | null;
   counts: { pilots: number };
+  owner?: { id: string; name: string | null; email: string };
+  mine?: boolean;
 }
 
 export function ApplicationsListPage() {
@@ -61,7 +63,14 @@ export function ApplicationsListPage() {
         <div className="stack">
           {apps.map((a) => (
             <Link key={a.id} to={`/applications/${a.id}`} className="card card-link">
-              <h2 style={{ margin: 0 }}>📦 {a.name}</h2>
+              <div className="spread" style={{ alignItems: "flex-start" }}>
+                <h2 style={{ margin: 0 }}>{a.name}</h2>
+                {a.owner && a.mine === false && (
+                  <span className="badge badge-invited" title={a.owner.email}>
+                    by {a.owner.name ?? a.owner.email}
+                  </span>
+                )}
+              </div>
               {a.description && (
                 <p className="muted" style={{ margin: "8px 0 0" }}>
                   {a.description}
@@ -195,15 +204,15 @@ export function ApplicationDetailPage() {
             <div className="muted" style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: 0.5 }}>
               Project
             </div>
-            <h1 style={{ margin: "2px 0 0" }}>📦 {app.name}</h1>
+            <h1 style={{ margin: "2px 0 0" }}>{app.name}</h1>
             {app.description && <p className="muted" style={{ margin: "6px 0 0" }}>{app.description}</p>}
           </div>
           <div className="row">
             <Link className="btn-ghost btn-sm" to={`/applications/${app.id}/feedback`}>
-              💬 Feedback
+              Feedback
             </Link>
             <Link className="btn-ghost btn-sm" to={`/applications/${app.id}/analytics`}>
-              📊 Analytics
+              Analytics
             </Link>
             <button className="btn-ghost btn-sm" onClick={() => setEditing(true)}>
               Edit
@@ -333,7 +342,7 @@ function ThemesSection({ appId }: { appId: string }) {
           {themes.map((t) => (
             <div key={t.id} className="list-item">
               <div style={{ minWidth: 0 }}>
-                <b>🔖 {t.name}</b>
+                <b>{t.name}</b>
                 <span className="muted" style={{ fontSize: 13, marginLeft: 8 }}>
                   {t.commentCount} {t.commentCount === 1 ? "comment" : "comments"}
                 </span>

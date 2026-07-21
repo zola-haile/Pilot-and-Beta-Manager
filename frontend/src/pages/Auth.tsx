@@ -7,7 +7,7 @@ function AuthShell({ title, children }: { title: string; children: React.ReactNo
   return (
     <div className="center-screen">
       <div className="card container-narrow" style={{ width: "100%" }}>
-        <h1 style={{ marginBottom: 4 }}>🚀 Pilot Manager</h1>
+        <h1 style={{ marginBottom: 4 }}>Pilotboard</h1>
         <p className="muted" style={{ marginTop: 0, marginBottom: 22 }}>
           {title}
         </p>
@@ -104,6 +104,7 @@ export function RegisterPage() {
   const { user } = useAuth();
   const [role, setRole] = useState<"PM" | "PARTICIPANT">("PM");
   const [name, setName] = useState("");
+  const [organizationName, setOrganizationName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -120,7 +121,13 @@ export function RegisterPage() {
       await api("/auth/register", {
         method: "POST",
         auth: false,
-        body: { name, email, password, role },
+        body: {
+          name,
+          email,
+          password,
+          role,
+          ...(role === "PM" && organizationName.trim() ? { organizationName } : {}),
+        },
       });
       setSent(true);
     } catch (err: any) {
@@ -173,6 +180,20 @@ export function RegisterPage() {
           <span>Name</span>
           <input value={name} onChange={(e) => setName(e.target.value)} required />
         </label>
+        {role === "PM" && (
+          <label className="field">
+            <span>Organization name</span>
+            <input
+              value={organizationName}
+              onChange={(e) => setOrganizationName(e.target.value)}
+              placeholder="e.g. Northwind Labs"
+            />
+            <small className="muted">
+              Your team's workspace. You can invite other PMs into it later. Optional — we'll name
+              it after you if left blank.
+            </small>
+          </label>
+        )}
         <label className="field">
           <span>Email</span>
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />

@@ -5,6 +5,7 @@ import { authRouter } from "./routes/auth";
 import { applicationRouter } from "./routes/application";
 import { pilotsRouter } from "./routes/pilots";
 import { adminRouter } from "./routes/admin";
+import { orgRouter } from "./routes/org";
 import { joinRouter } from "./routes/join";
 import { participantRouter } from "./routes/participant";
 import path from "path";
@@ -33,11 +34,12 @@ app.use("/auth", authRouter);
 app.use("/", applicationRouter); // /applications, /companies, /features
 app.use("/pilots", pilotsRouter);
 app.use("/admin", adminRouter);
+app.use("/org", orgRouter);
 app.use("/join", joinRouter);
 app.use("/my", participantRouter);
 
 app.use(errorHandler);
 
 app.listen(config.port, () => {
-  console.log(`🚀 Pilot Manager API listening on http://localhost:${config.port}`);
+  console.log(`Pilotboard API listening on http://localhost:${config.port}`);
 });
