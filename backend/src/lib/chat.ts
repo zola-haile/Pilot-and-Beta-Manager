@@ -1,88 +1,60 @@
 import { prisma } from "../prisma";
-import { signUploadPath, saveDataUrlImage } from "./uploads";
+import { signUploadPath, saveDataUrlFile, SavedFile } from "./uploads";
 
-// How a chat message is loaded from the DB (author + optional shared report + attachments).
+// How a private-thread message is loaded (author + attachments).
 const messageInclude = {
   user: { select: { id: true, name: true } },
-  comment: { include: { features: true, images: true } },
   images: true,
 } as const;
 
-/** Persist up to 6 data-URL images for a chat message; returns their public paths. */
-export async function saveChatImages(images: string[]): Promise<string[]> {
-  const urls: string[] = [];
-  for (const dataUrl of images.slice(0, 6)) urls.push(await saveDataUrlImage(dataUrl));
-  return urls;
+export interface IncomingFile {
+  data: string; // data URL
+  name?: string;
+}
+
+/** Persist up to 6 file attachments for a chat message. */
+export async function saveChatImages(files: IncomingFile[]): Promise<SavedFile[]> {
+  const saved: SavedFile[] = [];
+  for (const f of files.slice(0, 6)) saved.push(await saveDataUrlFile(f.data, f.name));
+  return saved;
 }
 
 type LoadedMessage = Awaited<
   ReturnType<typeof prisma.chatMessage.findFirstOrThrow<{ include: typeof messageInclude }>>
 >;
 
-export interface ChatReportView {
-  category: string;
-  body: string;
-  features: { id: string; name: string }[];
-  images: { id: string; url: string }[];
-}
 export interface ChatMessageView {
   id: string;
   body: string;
-  kind: "PUBLIC" | "ANNOUNCEMENT" | "PRIVATE";
   createdAt: Date;
-  authorName: string | null; // null = posted anonymously
-  isOrganizer: boolean; // posted by the pilot's PM (only when not anonymous)
+  authorName: string | null;
+  isOrganizer: boolean; // posted by the pilot's PM
   isMine: boolean; // posted by the viewer
-  report: ChatReportView | null; // a shared report snapshot, if any
-  images: { id: string; url: string }[]; // image attachments (signed URLs)
+  images: { id: string; url: string; name: string | null; mime: string | null }[]; // attachments (signed URLs)
 }
 
 /**
- * Shape a message for a given viewer. Anonymity is absolute for public messages:
- * an anonymous one exposes neither the author's name nor that it came from the
- * organizer. Anonymity never applies to private DMs (they're a direct, named line).
+ * Shape a private-thread message for a given viewer. Private threads are a direct,
+ * named line between the PM and one participant — never anonymous.
  */
 export function serializeMessage(
   m: LoadedMessage,
   viewerId: string,
   ownerPmId: string
 ): ChatMessageView {
-  const anon = m.anonymous && m.kind !== "PRIVATE";
-  const isOrganizer = !anon && m.userId === ownerPmId;
-  const authorName = anon
-    ? null
-    : m.user.name?.trim() || (isOrganizer ? "Organizer" : "Participant");
+  const isOrganizer = m.userId === ownerPmId;
   return {
     id: m.id,
     body: m.body,
-    kind: m.kind,
     createdAt: m.createdAt,
-    authorName,
+    authorName: m.user.name?.trim() || (isOrganizer ? "Organizer" : "Participant"),
     isOrganizer,
     isMine: m.userId === viewerId,
-    report: m.comment
-      ? {
-          category: m.comment.category,
-          body: m.comment.body,
-          features: m.comment.features.map((f) => ({ id: f.id, name: f.name })),
-          images: m.comment.images.map((i) => ({ id: i.id, url: signUploadPath(i.url) })),
-        }
-      : null,
-    images: m.images.map((i) => ({ id: i.id, url: signUploadPath(i.url) })),
+    images: m.images.map((i) => ({ id: i.id, url: signUploadPath(i.url), name: i.name, mime: i.mime })),
   };
 }
 
-/** The public group channel (normal messages + announcements), oldest first. */
-export async function listPublicChat(pilotId: string, viewerId: string, ownerPmId: string) {
-  const messages = await prisma.chatMessage.findMany({
-    where: { pilotId, kind: { in: ["PUBLIC", "ANNOUNCEMENT"] } },
-    orderBy: { createdAt: "asc" },
-    include: messageInclude,
-  });
-  return messages.map((m) => serializeMessage(m, viewerId, ownerPmId));
-}
-
-/** One private DM thread (between the PM and the participant `threadUserId`). */
+/** One private thread (between the PM and the participant `threadUserId`). */
 export async function listPrivateThread(
   pilotId: string,
   threadUserId: string,
@@ -90,7 +62,7 @@ export async function listPrivateThread(
   ownerPmId: string
 ) {
   const messages = await prisma.chatMessage.findMany({
-    where: { pilotId, kind: "PRIVATE", threadUserId },
+    where: { pilotId, threadUserId },
     orderBy: { createdAt: "asc" },
     include: messageInclude,
   });
@@ -100,7 +72,7 @@ export async function listPrivateThread(
 /** For the PM: a summary of every participant who has an open private thread. */
 export async function listPrivateThreads(pilotId: string) {
   const messages = await prisma.chatMessage.findMany({
-    where: { pilotId, kind: "PRIVATE" },
+    where: { pilotId },
     orderBy: { createdAt: "asc" },
     include: { threadUser: { select: { id: true, name: true } } },
   });
@@ -115,7 +87,6 @@ export async function listPrivateThreads(pilotId: string) {
 
   const threads = new Map<string, { userId: string; name: string; company: string | null; count: number; lastAt: Date }>();
   for (const m of messages) {
-    if (!m.threadUserId) continue;
     const t = threads.get(m.threadUserId);
     if (t) {
       t.count += 1;

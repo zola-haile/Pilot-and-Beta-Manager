@@ -3,10 +3,13 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { Layout, Spinner, StatusBadge } from "../components";
 import { FeedbackWorkspace } from "./Feedback";
-import { ChatPanel, PrivateThreadsPanel } from "./Chat";
+import { PrivateThreadsPanel } from "./Chat";
+import {
+  useImageAttach, AttachmentPreviews, AttachmentList, DropOverlay, AttachmentRef,
+} from "../ImageAttach";
 import {
   PilotExport, downloadText, exportBaseName,
-  commentsCsv, responsesCsv, ratingsCsv, chatCsv,
+  commentsCsv, responsesCsv, ratingsCsv,
 } from "../export";
 
 const QUESTION_TYPES = [
@@ -69,6 +72,7 @@ interface PilotDetail {
   endDate: string | null;
   status: string;
   allFeatures: boolean;
+  surveyEnabled: boolean;
   features: PilotFeature[];
   questions: Question[];
   companies: PilotCompanyRow[];
@@ -89,7 +93,7 @@ export function PilotDetailPage() {
   const [pilot, setPilot] = useState<PilotDetail | null>(null);
   const [responses, setResponses] = useState<ResponseRow[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"setup" | "people" | "responses" | "feedback" | "chat">("setup");
+  const [tab, setTab] = useState<"setup" | "people" | "responses" | "feedback" | "questions" | "announce">("setup");
 
   async function load() {
     try {
@@ -150,7 +154,8 @@ export function PilotDetailPage() {
           { key: "people", label: "People", count: pilot.participants.length },
           { key: "responses", label: "Responses", count: responses.length },
           { key: "feedback", label: "Feedback" },
-          { key: "chat", label: "Chat" },
+          { key: "questions", label: "Questions" },
+          { key: "announce", label: "Announce" },
         ] as const).map((t) => (
           <button
             key={t.key}
@@ -173,12 +178,19 @@ export function PilotDetailPage() {
               features={pilot.features}
               onChange={load}
             />
-            <QuestionsSection
+            <SurveyToggleSection
               pilotId={pilot.id}
-              questions={pilot.questions}
-              features={pilot.features}
+              surveyEnabled={pilot.surveyEnabled}
               onChange={load}
             />
+            {pilot.surveyEnabled && (
+              <QuestionsSection
+                pilotId={pilot.id}
+                questions={pilot.questions}
+                features={pilot.features}
+                onChange={load}
+              />
+            )}
           </>
         )}
         {tab === "people" && (
@@ -206,18 +218,139 @@ export function PilotDetailPage() {
             />
           </div>
         )}
-        {tab === "chat" && (
-          <>
-            <ChatPanel
-              basePath={`/pilots/${pilot.id}/chat`}
-              blurb="The group channel for everyone in this pilot. Reply to questions, or post an announcement."
-              allowAnnouncement
-            />
-            <PrivateThreadsPanel pilotId={pilot.id} />
-          </>
-        )}
+        {tab === "questions" && <PrivateThreadsPanel pilotId={pilot.id} />}
+        {tab === "announce" && <AnnouncementsSection pilotId={pilot.id} />}
       </div>
     </Layout>
+  );
+}
+
+interface Announcement {
+  id: string;
+  subject: string;
+  body: string;
+  createdAt: string;
+  authorName: string | null;
+  images: AttachmentRef[];
+}
+
+// Broadcast a message to everyone in the pilot (participants + company admins).
+function AnnouncementsSection({ pilotId }: { pilotId: string }) {
+  const [items, setItems] = useState<Announcement[]>([]);
+  const [subject, setSubject] = useState("");
+  const [body, setBody] = useState("");
+  const { files, payload, addFiles, remove, clear, dragging, dropzoneProps, pasteProps, max } = useImageAttach();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  async function load() {
+    const res = await api<{ announcements: Announcement[] }>(`/pilots/${pilotId}/announcements`);
+    setItems(res.announcements);
+  }
+  useEffect(() => {
+    load().catch((err) => setError(err.message));
+  }, [pilotId]);
+
+  async function send(e: FormEvent) {
+    e.preventDefault();
+    if (!subject.trim() || !body.trim()) return;
+    if (!confirm("Email this announcement to everyone in the pilot?")) return;
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const res = await api<{ recipientCount: number }>(`/pilots/${pilotId}/announcements`, {
+        method: "POST",
+        body: { subject, body, images: payload },
+      });
+      setSubject("");
+      setBody("");
+      clear();
+      setNotice(`Sent to ${res.recipientCount} ${res.recipientCount === 1 ? "person" : "people"}.`);
+      await load();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <form className={`card composer dropzone ${dragging ? "is-dragover" : ""}`} onSubmit={send} {...dropzoneProps}>
+        <DropOverlay show={dragging} max={max} />
+        <h2 style={{ margin: 0 }}>Send an announcement</h2>
+        <p className="muted" style={{ marginTop: 4 }}>
+          Emails everyone in this pilot — every participant and each partner company's admin.
+        </p>
+        {error && <div className="alert alert-error" style={{ marginTop: 10 }}>{error}</div>}
+        {notice && <div className="alert alert-success" style={{ marginTop: 10 }}>{notice}</div>}
+        <label className="field" style={{ marginTop: 10 }}>
+          <span>Subject</span>
+          <input
+            type="text"
+            value={subject}
+            maxLength={200}
+            onChange={(e) => setSubject(e.target.value)}
+            placeholder="e.g. New build available for testing"
+          />
+        </label>
+        <label className="field">
+          <span>Message</span>
+          <textarea
+            value={body}
+            rows={5}
+            maxLength={5000}
+            onChange={(e) => setBody(e.target.value)}
+            placeholder="What do you want everyone to know?"
+            {...pasteProps}
+          />
+        </label>
+        <div className="field">
+          <label className="file-choose">
+            <input
+              type="file"
+              multiple
+              onChange={(e) => {
+                if (e.target.files) addFiles(e.target.files);
+                e.target.value = ""; // allow re-picking the same file
+              }}
+            />
+            Choose files or drag and drop
+          </label>
+          <AttachmentPreviews files={files} onRemove={remove} />
+        </div>
+        <button type="submit" disabled={busy || !subject.trim() || !body.trim()}>
+          {busy ? "Sending…" : "Send to everyone"}
+        </button>
+      </form>
+
+      <div className="card">
+        <h3 style={{ marginTop: 0 }}>Sent announcements</h3>
+        {items.length === 0 ? (
+          <p className="muted" style={{ margin: 0 }}>No announcements sent yet.</p>
+        ) : (
+          <div className="stack">
+            {items.map((a) => (
+              <div key={a.id} className="card" style={{ boxShadow: "none", background: "#fafbfc" }}>
+                <div className="spread">
+                  <b>{a.subject}</b>
+                  <span className="muted" style={{ fontSize: 13 }}>
+                    {new Date(a.createdAt).toLocaleString()}
+                  </span>
+                </div>
+                <p style={{ margin: "8px 0 0", whiteSpace: "pre-wrap" }}>{a.body}</p>
+                <AttachmentList items={a.images} />
+                {a.authorName && (
+                  <p className="muted" style={{ margin: "8px 0 0", fontSize: 12 }}>— {a.authorName}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -252,11 +385,11 @@ function ExportMenu({ pilotId }: { pilotId: string }) {
     }
   }
 
-  function save(kind: "json" | "comments" | "responses" | "ratings" | "chat") {
+  function save(kind: "json" | "comments" | "responses" | "ratings") {
     if (!data) return;
     const base = exportBaseName(data);
     if (kind === "json") return downloadText(`${base}.json`, JSON.stringify(data, null, 2), "application/json");
-    const csv = { comments: commentsCsv, responses: responsesCsv, ratings: ratingsCsv, chat: chatCsv }[kind](data);
+    const csv = { comments: commentsCsv, responses: responsesCsv, ratings: ratingsCsv }[kind](data);
     downloadText(`${base}-${kind}.csv`, csv, "text/csv");
   }
 
@@ -264,7 +397,6 @@ function ExportMenu({ pilotId }: { pilotId: string }) {
     comments: data.comments.length,
     responses: data.responses.length,
     ratings: data.featureRatings.entries.length,
-    chat: data.chat.length,
   };
 
   return (
@@ -289,13 +421,65 @@ function ExportMenu({ pilotId }: { pilotId: string }) {
               <button className="export-item" onClick={() => save("ratings")} disabled={!counts!.ratings}>
                 Feature ratings <span className="muted">· CSV ({counts!.ratings})</span>
               </button>
-              <button className="export-item" onClick={() => save("chat")} disabled={!counts!.chat}>
-                Pilot chat <span className="muted">· CSV ({counts!.chat})</span>
-              </button>
             </>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/* --------------------------- Survey toggle ---------------------------- */
+
+// Turns the participant survey on or off for this pilot. When off, participants
+// see no Survey tab and can't submit entries, and the question editor is hidden.
+function SurveyToggleSection({
+  pilotId,
+  surveyEnabled,
+  onChange,
+}: {
+  pilotId: string;
+  surveyEnabled: boolean;
+  onChange: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function toggle(next: boolean) {
+    setError(null);
+    setBusy(true);
+    try {
+      await api(`/pilots/${pilotId}`, { method: "PATCH", body: { surveyEnabled: next } });
+      onChange();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <div className="spread">
+        <div>
+          <h2 style={{ margin: 0 }}>Survey</h2>
+          <p className="muted" style={{ marginTop: 4, marginBottom: 0 }}>
+            {surveyEnabled
+              ? "Participants can fill in a structured survey below. Turn it off if this pilot only collects open reports."
+              : "This pilot collects no survey — participants just post reports. Turn it on to add structured questions."}
+          </p>
+        </div>
+        <label className="inline-check" style={{ alignSelf: "center", whiteSpace: "nowrap" }}>
+          <input
+            type="checkbox"
+            checked={surveyEnabled}
+            disabled={busy}
+            onChange={(e) => toggle(e.target.checked)}
+          />
+          <span>Collect a survey</span>
+        </label>
+      </div>
+      {error && <div className="alert alert-error" style={{ marginTop: 10 }}>{error}</div>}
     </div>
   );
 }

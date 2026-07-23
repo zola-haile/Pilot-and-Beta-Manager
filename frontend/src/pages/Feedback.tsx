@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { Layout, Spinner } from "../components";
 import { categoryLabel, priorityLabel, statusLabel } from "../categories";
-import { CommentCard } from "./ParticipantForm";
+import { CommentCard, Reply } from "./ParticipantForm";
 
 /* ------------------------------- Types ------------------------------- */
 
@@ -22,14 +22,16 @@ export interface ThemeRef {
 }
 export interface FeedbackComment {
   id: string;
+  subject: string | null;
   body: string;
   category: string;
   createdAt: string;
-  author: { name: string | null; email: string };
+  anonymous: boolean;
+  author: { name: string | null; email: string | null };
   company: string | null;
   pilot?: { id: string; name: string }; // present in app scope
   features: { id: string; name: string }[];
-  images: { id: string; url: string }[];
+  images: { id: string; url: string; name: string | null; mime: string | null }[];
   status: string;
   priority: string | null;
   assignee: string | null;
@@ -37,6 +39,7 @@ export interface FeedbackComment {
   duplicateCount: number;
   theme: ThemeRef | null;
   notes: TriageNote[];
+  replies: Reply[];
 }
 
 interface FeedbackResponse {
@@ -50,8 +53,9 @@ const STATUS_ORDER = ["NEW", "TRIAGED", "PLANNED", "IN_PROGRESS", "DONE", "WONT_
 const OPEN_STATUSES = ["NEW", "TRIAGED", "PLANNED", "IN_PROGRESS"];
 
 export function shortLabel(c: FeedbackComment): string {
-  const who = c.author.name ?? c.author.email;
-  const snippet = c.body.length > 40 ? `${c.body.slice(0, 40)}…` : c.body;
+  const who = c.anonymous ? "Anonymous" : c.author.name ?? c.author.email ?? "Participant";
+  const text = c.subject?.trim() || c.body;
+  const snippet = text.length > 40 ? `${text.slice(0, 40)}…` : text;
   return `${who}: ${snippet}`;
 }
 
@@ -181,7 +185,7 @@ export function FeedbackWorkspace({
     if (f.to && new Date(c.createdAt) > new Date(f.to + "T23:59:59")) return false;
     if (f.query.trim()) {
       const q = f.query.trim().toLowerCase();
-      const hay = `${c.body} ${c.assignee ?? ""} ${c.author.name ?? ""} ${c.author.email} ${
+      const hay = `${c.subject ?? ""} ${c.body} ${c.assignee ?? ""} ${c.author.name ?? ""} ${c.author.email ?? ""} ${
         c.company ?? ""
       } ${c.features.map((x) => x.name).join(" ")}`.toLowerCase();
       if (!hay.includes(q)) return false;
@@ -318,8 +322,11 @@ export function FeedbackWorkspace({
           renderDetail={(c) => (
             <CommentCard
               comment={c}
-              author={c.author.name ?? c.author.email}
+              author={c.anonymous ? "Anonymous" : c.author.name ?? c.author.email ?? "Participant"}
               company={c.company}
+              replyBasePath={`/pilots/${pilotIdOf(c)}/comments/${c.id}/replies`}
+              canModerateReplies
+              onChanged={reloadKeepingSelection}
               footer={
                 <TriagePanel
                   pilotId={pilotIdOf(c)}
@@ -451,7 +458,7 @@ function FilterBar({
         </label>
         <label className="inline-check" style={{ fontSize: 13 }}>
           <input type="checkbox" checked={filters.hasImages} onChange={(e) => set({ hasImages: e.target.checked })} />
-          <span>Has images</span>
+          <span>Has files</span>
         </label>
       </div>
     </div>
@@ -646,9 +653,12 @@ function InboxTable({
                     {categoryLabel(c.category)}
                   </span>
                   <a role="button" onClick={() => toggleOpen(c.id)} style={{ cursor: "pointer" }}>
-                    {c.body.length > 70 ? `${c.body.slice(0, 70)}…` : c.body}
+                    {(() => {
+                      const t = c.subject?.trim() || c.body;
+                      return t.length > 70 ? `${t.slice(0, 70)}…` : t;
+                    })()}
                   </a>
-                  {c.images.length > 0 && <span className="muted" title="has images"> · image</span>}
+                  {c.images.length > 0 && <span className="muted" title="has files"> · file</span>}
                   {c.duplicateOfId && <span className="muted"> · dup</span>}
                   {c.duplicateCount > 0 && <span className="muted"> · {c.duplicateCount} dup</span>}
                   {c.theme && <span className="chip" style={{ marginLeft: 6 }}>{c.theme.name}</span>}
@@ -757,6 +767,8 @@ function Board({
                     />
                   </div>
                   <div style={{ fontSize: 13, margin: "6px 0" }}>
+                    {c.subject?.trim() && <b>{c.subject}</b>}
+                    {c.subject?.trim() && <br />}
                     {c.body.length > 90 ? `${c.body.slice(0, 90)}…` : c.body}
                   </div>
                   <div className="row" style={{ flexWrap: "wrap", gap: 5 }}>
@@ -765,7 +777,7 @@ function Board({
                     {scope === "app" && c.pilot && (
                       <span className="muted" style={{ fontSize: 12 }}>· {c.pilot.name}</span>
                     )}
-                    {c.images.length > 0 && <span className="muted" style={{ fontSize: 12 }}>image</span>}
+                    {c.images.length > 0 && <span className="muted" style={{ fontSize: 12 }}>file</span>}
                   </div>
                   {c.assignee && (
                     <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>

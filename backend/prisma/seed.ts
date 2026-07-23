@@ -84,30 +84,17 @@ function rate(pilotId: string, userId: string, featureId: string, stars: number)
   return prisma.featureRating.create({ data: { pilotId, userId, featureId, stars } });
 }
 
-/** A chat message (public / announcement / private DM), optionally sharing a report. */
-function chat(
-  pilotId: string,
-  userId: string,
-  body: string,
-  opts: {
-    kind?: "PUBLIC" | "ANNOUNCEMENT" | "PRIVATE";
-    anonymous?: boolean;
-    threadUserId?: string;
-    commentId?: string;
-    at: Date;
-  }
-) {
+/** A private "Ask a question" message in the thread keyed on `threadUserId` (the participant). */
+function ask(pilotId: string, userId: string, threadUserId: string, body: string, at: Date) {
   return prisma.chatMessage.create({
-    data: {
-      pilotId,
-      userId,
-      body,
-      kind: opts.kind ?? "PUBLIC",
-      anonymous: opts.anonymous ?? false,
-      threadUserId: opts.threadUserId ?? null,
-      commentId: opts.commentId ?? null,
-      createdAt: opts.at,
-    },
+    data: { pilotId, userId, threadUserId, body, createdAt: at },
+  });
+}
+
+/** A public reply in a report's discussion thread. `anonymous` hides the author. */
+function reply(commentId: string, userId: string, body: string, at: Date, anonymous = false) {
+  return prisma.commentReply.create({
+    data: { commentId, userId, body, anonymous, createdAt: at },
   });
 }
 
@@ -233,6 +220,7 @@ async function main() {
     data: {
       pilotId: beta.id,
       userId: uma.userId!,
+      subject: "Checkout button hard to find on mobile",
       body: "The checkout button is hard to find on mobile — could it be more prominent?",
       category: "ENHANCEMENT",
       status: "PLANNED",
@@ -259,6 +247,7 @@ async function main() {
     data: {
       pilotId: beta.id,
       userId: raj.userId!,
+      subject: "Payment error on first attempt",
       body: "Payment page threw an error the first time, worked on retry.",
       category: "BUG",
       priority: "CRITICAL",
@@ -266,15 +255,26 @@ async function main() {
     },
   });
 
-  // Chat: announcement, public thread, an anonymous note, a shared report, and a private DM.
-  await chat(beta.id, pat.id, "Welcome to the Beta v2 channel! Drop questions and feedback here.", { kind: "ANNOUNCEMENT", at: daysFromNow(-6) });
-  await chat(beta.id, uma.userId!, "Is anyone else seeing the checkout button get cut off on mobile?", { at: daysFromNow(-5) });
-  await chat(beta.id, raj.userId!, "Yeah, same on my Pixel — switching to desktop worked.", { at: daysFromNow(-5) });
-  await chat(beta.id, uma.userId!, "Sharing my report so it's on everyone's radar.", { commentId: umaReport.id, at: daysFromNow(-4) });
-  await chat(beta.id, ana.userId!, "Honestly the search is great though — credit where it's due.", { anonymous: true, at: daysFromNow(-4) });
-  await chat(beta.id, pat.id, "Thanks all — a sticky checkout button is planned for next sprint.", { at: daysFromNow(-3) });
-  await chat(beta.id, uma.userId!, "Quick one — could I get a few extra days to finish testing?", { kind: "PRIVATE", threadUserId: uma.userId!, at: daysFromNow(-2) });
-  await chat(beta.id, pat.id, "Of course, take an extra week. Thanks for the thorough feedback!", { kind: "PRIVATE", threadUserId: uma.userId!, at: daysFromNow(-2) });
+  // Public discussion under Uma's report: a peer chimes in, then the PM responds.
+  await reply(umaReport.id, raj.userId!, "Same on my Pixel — switching to desktop worked.", daysFromNow(-5));
+  await reply(umaReport.id, ana.userId!, "+1, couldn't find it on an iPhone SE either.", daysFromNow(-4), true); // anonymous reply
+  await reply(umaReport.id, pat.id, "Thanks all — a sticky checkout button is planned for next sprint.", daysFromNow(-3));
+
+  // An anonymous report: identity hidden from peers AND the PM.
+  await prisma.comment.create({
+    data: {
+      pilotId: beta.id,
+      userId: ana.userId!,
+      body: "Being honest — the search is genuinely great. Credit where it's due.",
+      category: "PRAISE",
+      anonymous: true,
+      features: { connect: [{ id: searchBar.id }] },
+    },
+  });
+
+  // A private "Ask a question" thread between Uma and Pat.
+  await ask(beta.id, uma.userId!, uma.userId!, "Quick one — could I get a few extra days to finish testing?", daysFromNow(-2));
+  await ask(beta.id, pat.id, uma.userId!, "Of course, take an extra week. Thanks for the thorough feedback!", daysFromNow(-2));
 
   /* ===== Pat's second project: MobileApp ============================ */
   const mobile = await prisma.application.create({
@@ -313,7 +313,7 @@ async function main() {
   await entry(mobileBeta.id, uma.userId!, { [mobileQ.id]: "Consistent with the web checkout — nice." }, daysFromNow(-1));
   await rate(mobileBeta.id, kim.userId!, mobileNav.id, 5);
   await rate(mobileBeta.id, leo.userId!, mobileNav.id, 3);
-  await prisma.comment.create({
+  const leoLag = await prisma.comment.create({
     data: {
       pilotId: mobileBeta.id,
       userId: leo.userId!,
@@ -323,8 +323,10 @@ async function main() {
       features: { connect: [{ id: mobileNav.id }] },
     },
   });
-  await chat(mobileBeta.id, pat.id, "Welcome to the Mobile Closed Beta! Tell us how it feels on your device.", { kind: "ANNOUNCEMENT", at: daysFromNow(-3) });
-  await chat(mobileBeta.id, kim.userId!, "Bottom tab nav is a big improvement.", { at: daysFromNow(-2) });
+  await reply(leoLag.id, kim.userId!, "Bottom tab nav is a big improvement, but I've seen that lag too.", daysFromNow(-2));
+  await reply(leoLag.id, pat.id, "Thanks — we're profiling menu open times this week.", daysFromNow(-1));
+  await ask(mobileBeta.id, kim.userId!, kim.userId!, "Should I test on both my phones or just the primary one?", daysFromNow(-2));
+  await ask(mobileBeta.id, pat.id, kim.userId!, "Primary is plenty — thanks Kim!", daysFromNow(-1));
 
   /* ===== Morgan's project (org ADMIN runs their own too): InsightsDashboard = */
   const insights = await prisma.application.create({
@@ -360,7 +362,7 @@ async function main() {
   await entry(insightsPilot.id, quinn.userId!, { [iQ1.id]: "3", [iQ2.id]: "CSV export is a must-have." }, daysFromNow(-2));
   await rate(insightsPilot.id, priya.userId!, widgets.id, 4);
   await rate(insightsPilot.id, quinn.userId!, csvExport.id, 5);
-  await prisma.comment.create({
+  const quinnCsv = await prisma.comment.create({
     data: {
       pilotId: insightsPilot.id,
       userId: quinn.userId!,
@@ -370,8 +372,9 @@ async function main() {
       features: { connect: [{ id: csvExport.id }] },
     },
   });
-  await chat(insightsPilot.id, morgan.id, "Welcome! Poke around the dashboard and tell us what's missing.", { kind: "ANNOUNCEMENT", at: daysFromNow(-9) });
-  await chat(insightsPilot.id, priya.userId!, "Loving the widgets. A retention report would be great.", { at: daysFromNow(-4) });
+  await reply(quinnCsv.id, priya.userId!, "Hit the same cap — a retention report on top of this would be ideal.", daysFromNow(-3));
+  await reply(quinnCsv.id, morgan.id, "Good catch — raising the export cap is on the list.", daysFromNow(-2));
+  await ask(insightsPilot.id, priya.userId!, priya.userId!, "Is the scheduled-reports feature in scope for this preview?", daysFromNow(-4));
 
   /* ===== Sam's project (org MEMBER, own work only): MobileWallet ===== */
   const walletApp = await prisma.application.create({
@@ -413,7 +416,7 @@ async function main() {
   await rate(wallet.id, finn.userId!, balance.id, 3);
   await rate(wallet.id, gwen.userId!, tapToPay.id, 5);
   await rate(wallet.id, gwen.userId!, txns.id, 4);
-  await prisma.comment.create({
+  const finnTap = await prisma.comment.create({
     data: {
       pilotId: wallet.id,
       userId: finn.userId!,
@@ -433,9 +436,9 @@ async function main() {
       features: { connect: [{ id: balance.id }] },
     },
   });
-  await chat(wallet.id, sam.id, "Welcome to the Wallet early access channel!", { kind: "ANNOUNCEMENT", at: daysFromNow(-2) });
-  await chat(wallet.id, finn.userId!, "Tap to pay is slick — sometimes needs a second tap though.", { at: daysFromNow(-2) });
-  await chat(wallet.id, gwen.userId!, "Setup was painless for me!", { at: daysFromNow(-1) });
+  await reply(finnTap.id, gwen.userId!, "Setup was painless for me, but I've had the double-tap thing once too.", daysFromNow(-1));
+  await reply(finnTap.id, sam.id, "Thanks — we think it's a debounce issue and are on it.", daysFromNow(-1));
+  await ask(wallet.id, finn.userId!, finn.userId!, "Is there a limit on the number of test transactions?", daysFromNow(-2));
 
   /* ------------------------------ summary ---------------------------- */
   console.log("Done.  Organization: Northwind Labs\n");

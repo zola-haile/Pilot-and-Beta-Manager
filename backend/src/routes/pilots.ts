@@ -12,14 +12,21 @@ import {
   PRIORITY_VALUES,
   COMMENT_STATUSES,
   COMMENT_PRIORITIES,
+  serializeReply,
 } from "../lib/comments";
 import { CommentStatus, CommentPriority } from "@prisma/client";
 import { commentAnalytics, questionRollups, sentimentScore } from "../lib/analytics";
 import { pilotedFeatures, pilotedFeatureIds } from "../lib/pilotFeatures";
-import { signUploadPath } from "../lib/uploads";
+import { signUploadPath, saveDataUrlFile } from "../lib/uploads";
 import {
-  listPublicChat, listPrivateThread, listPrivateThreads, serializeCreated, saveChatImages,
+  listPrivateThread, listPrivateThreads, serializeCreated, saveChatImages,
 } from "../lib/chat";
+import {
+  notifyReply,
+  notifyPrivateMessage,
+  notifyAnnouncement,
+  announcementRecipients,
+} from "../lib/notify";
 import { buildPilotExport } from "../lib/export";
 import { Actor, canManage } from "../lib/authz";
 
@@ -72,6 +79,7 @@ const upsertPilotSchema = z.object({
   description: z.string().optional().nullable(),
   startDate: z.string().datetime().optional().nullable(),
   endDate: z.string().datetime().optional().nullable(),
+  surveyEnabled: z.boolean().optional(),
 });
 
 // GET /pilots/:id — full detail: questions, participants (with company), summary.
@@ -134,6 +142,7 @@ pilotsRouter.get(
         createdAt: pilot.createdAt,
         status: pilotStatus(pilot.startDate, pilot.endDate),
         allFeatures: pilot.allFeatures,
+        surveyEnabled: pilot.surveyEnabled,
         features: features.map((f) => {
           const r = ratingByFeature.get(f.id);
           return {
@@ -188,6 +197,7 @@ pilotsRouter.patch(
         ...(data.endDate !== undefined
           ? { endDate: data.endDate ? new Date(data.endDate) : null }
           : {}),
+        ...(data.surveyEnabled !== undefined ? { surveyEnabled: data.surveyEnabled } : {}),
       },
     });
     res.json({ pilot: { ...pilot, status: pilotStatus(pilot.startDate, pilot.endDate) } });
@@ -638,6 +648,7 @@ pilotsRouter.get(
         features: true,
         images: true,
         notes: { orderBy: { createdAt: "asc" } },
+        replies: { orderBy: { createdAt: "asc" }, include: { user: { select: { id: true, name: true } } } },
         theme: { select: { id: true, name: true } },
         _count: { select: { duplicates: true } },
       },
@@ -658,17 +669,21 @@ pilotsRouter.get(
     const companyByUser = new Map(
       memberships.map((m) => [m.participant.userId!, m.participant.company.name])
     );
+    const ownerPmId = pilot.application.ownerId;
 
     res.json({
       comments: comments.map((c) => ({
         id: c.id,
+        subject: c.subject,
         body: c.body,
         category: c.category,
         createdAt: c.createdAt,
-        author: { name: c.user.name, email: c.user.email },
-        company: companyByUser.get(c.user.id) ?? null,
+        // Anonymity is absolute — the PM never sees the author of an anonymous report.
+        anonymous: c.anonymous,
+        author: c.anonymous ? { name: null, email: null } : { name: c.user.name, email: c.user.email },
+        company: c.anonymous ? null : companyByUser.get(c.user.id) ?? null,
         features: c.features.map((f) => ({ id: f.id, name: f.name })),
-        images: c.images.map((i) => ({ id: i.id, url: signUploadPath(i.url) })),
+        images: c.images.map((i) => ({ id: i.id, url: signUploadPath(i.url), name: i.name, mime: i.mime })),
         status: c.status,
         priority: c.priority,
         assignee: c.assignee,
@@ -676,6 +691,7 @@ pilotsRouter.get(
         duplicateCount: c._count.duplicates,
         theme: c.theme,
         notes: c.notes.map((n) => ({ id: n.id, body: n.body, createdAt: n.createdAt })),
+        replies: c.replies.map((r) => serializeReply(r, req.user!.sub, ownerPmId)),
       })),
       statuses: COMMENT_STATUSES,
       priorities: COMMENT_PRIORITIES,
@@ -782,6 +798,121 @@ pilotsRouter.delete(
     }
     await prisma.commentNote.delete({ where: { id: note.id } });
     res.status(204).end();
+  })
+);
+
+// POST /pilots/:id/comments/:cid/replies — the PM replies publicly on a report.
+// Shown to everyone as the Organizer (never anonymous).
+const pmReplySchema = z.object({ body: z.string().min(1, "Write a reply") });
+pilotsRouter.post(
+  "/:id/comments/:cid/replies",
+  asyncHandler(async (req, res) => {
+    const pilot = await getOwnedPilot(req.params.id, req.user!);
+    const comment = await prisma.comment.findUnique({ where: { id: req.params.cid } });
+    if (!comment || comment.pilotId !== req.params.id) throw new HttpError(404, "Report not found");
+    const { body } = pmReplySchema.parse(req.body);
+    // Post as the pilot's owning PM so the "Organizer" byline is correct even when
+    // an org overseer is the one acting.
+    const reply = await prisma.commentReply.create({
+      data: { commentId: comment.id, userId: pilot.application.ownerId, body: body.trim(), anonymous: false },
+      include: { user: { select: { id: true, name: true } } },
+    });
+    void notifyReply(reply.id); // fire-and-forget → the report author
+    res.status(201).json({ reply: serializeReply(reply, req.user!.sub, pilot.application.ownerId) });
+  })
+);
+
+// DELETE /pilots/:id/comments/:cid/replies/:rid — the PM removes a reply.
+pilotsRouter.delete(
+  "/:id/comments/:cid/replies/:rid",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!);
+    const reply = await prisma.commentReply.findUnique({ where: { id: req.params.rid } });
+    if (!reply || reply.commentId !== req.params.cid) throw new HttpError(404, "Reply not found");
+    await prisma.commentReply.delete({ where: { id: reply.id } });
+    res.status(204).end();
+  })
+);
+
+/* ---------------------------- Announcements --------------------------- */
+
+// GET /pilots/:id/announcements — the pilot's announcement history (PM view).
+pilotsRouter.get(
+  "/:id/announcements",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!);
+    const announcements = await prisma.announcement.findMany({
+      where: { pilotId: req.params.id },
+      orderBy: { createdAt: "desc" },
+      include: announcementInclude,
+    });
+    res.json({ announcements: announcements.map(serializeAnnouncement) });
+  })
+);
+
+const announcementInclude = {
+  author: { select: { name: true } },
+  images: true,
+} as const;
+
+type AnnouncementRow = {
+  id: string;
+  subject: string;
+  body: string;
+  createdAt: Date;
+  author: { name: string | null };
+  images: { id: string; url: string; name: string | null; mime: string | null }[];
+};
+
+function serializeAnnouncement(a: AnnouncementRow) {
+  return {
+    id: a.id,
+    subject: a.subject,
+    body: a.body,
+    createdAt: a.createdAt,
+    authorName: a.author.name,
+    images: a.images.map((i) => ({ id: i.id, url: signUploadPath(i.url), name: i.name, mime: i.mime })),
+  };
+}
+
+const announcementSchema = z.object({
+  subject: z.string().trim().min(1, "Add a subject").max(200, "Keep the subject under 200 characters"),
+  body: z.string().trim().min(1, "Write your announcement").max(5000, "That's too long (max 5000 characters)"),
+  images: z
+    .array(z.object({ data: z.string(), name: z.string().optional() }))
+    .max(6, "At most 6 files")
+    .optional()
+    .default([]),
+});
+
+// POST /pilots/:id/announcements — broadcast to everyone in the pilot.
+pilotsRouter.post(
+  "/:id/announcements",
+  asyncHandler(async (req, res) => {
+    await getOwnedPilot(req.params.id, req.user!);
+    const { subject, body, images } = announcementSchema.parse(req.body);
+
+    // Persist files to disk first (throws on invalid data).
+    const saved = [];
+    for (const f of images) saved.push(await saveDataUrlFile(f.data, f.name));
+
+    const announcement = await prisma.announcement.create({
+      data: {
+        pilotId: req.params.id,
+        authorId: req.user!.sub,
+        subject,
+        body,
+        images: { create: saved.map((s) => ({ url: s.url, name: s.name, mime: s.mime })) },
+      },
+      include: announcementInclude,
+    });
+    void notifyAnnouncement(announcement.id); // fire-and-forget email blast
+
+    const recipientCount = (await announcementRecipients(req.params.id)).length;
+    res.status(201).json({
+      announcement: serializeAnnouncement(announcement),
+      recipientCount,
+    });
   })
 );
 
@@ -920,58 +1051,10 @@ pilotsRouter.get(
   })
 );
 
-/* -------------------------------- Chat -------------------------------- */
-// The PM's window into a pilot's group channel — same messages the participants
-// see, so the PM can answer clarifications. The PM is the channel's organizer.
-
-// GET /pilots/:id/chat — read the public channel.
-pilotsRouter.get(
-  "/:id/chat",
-  asyncHandler(async (req, res) => {
-    const pilot = await getOwnedPilot(req.params.id, req.user!);
-    // The channel's "organizer" is the PM who owns the project, even when an org
-    // overseer is the one viewing.
-    const ownerPmId = pilot.application.ownerId;
-    res.json({ messages: await listPublicChat(req.params.id, req.user!.sub, ownerPmId) });
-  })
-);
-
-const pmChatSchema = z
-  .object({
-    body: z.string().max(4000).optional().default(""),
-    anonymous: z.boolean().optional().default(false),
-    announcement: z.boolean().optional().default(false),
-    images: z.array(z.string()).max(6, "At most 6 images").optional().default([]),
-  })
-  .refine((d) => d.body.trim().length > 0 || d.images.length > 0, {
-    message: "Write a message or attach an image",
-  });
-
-// POST /pilots/:id/chat — post in the channel as the organizer. `announcement`
-// pins it as a highlighted broadcast (never anonymous).
-pilotsRouter.post(
-  "/:id/chat",
-  asyncHandler(async (req, res) => {
-    const pilot = await getOwnedPilot(req.params.id, req.user!);
-    const ownerPmId = pilot.application.ownerId;
-    const { body, anonymous, announcement, images } = pmChatSchema.parse(req.body);
-    const urls = await saveChatImages(images);
-    const created = await prisma.chatMessage.create({
-      data: {
-        pilotId: req.params.id,
-        userId: req.user!.sub,
-        body: body.trim(),
-        kind: announcement ? "ANNOUNCEMENT" : "PUBLIC",
-        anonymous: announcement ? false : anonymous,
-        images: { create: urls.map((url) => ({ url })) },
-      },
-    });
-    res.status(201).json({ message: await serializeCreated(created.id, req.user!.sub, ownerPmId) });
-  })
-);
-
-/* --------------------------- Private DM threads --------------------------- */
-// One-to-one lines between the PM and individual participants.
+/* --------------------------- Private threads --------------------------- */
+// One-to-one lines between the PM and individual participants (surfaced to
+// participants as "Ask a question"). The old shared group channel was removed —
+// reports are now the public space.
 
 // GET /pilots/:id/chat/private — summary of participants with an open thread.
 pilotsRouter.get(
@@ -1002,10 +1085,14 @@ pilotsRouter.get(
 const pmPrivateSchema = z
   .object({
     body: z.string().max(4000).optional().default(""),
-    images: z.array(z.string()).max(6, "At most 6 images").optional().default([]),
+    images: z
+      .array(z.object({ data: z.string(), name: z.string().optional() }))
+      .max(6, "At most 6 files")
+      .optional()
+      .default([]),
   })
   .refine((d) => d.body.trim().length > 0 || d.images.length > 0, {
-    message: "Write a message or attach an image",
+    message: "Write a message or attach a file",
   });
 
 pilotsRouter.post(
@@ -1020,17 +1107,17 @@ pilotsRouter.post(
     });
     if (!membership) throw new HttpError(404, "Participant not found in this pilot");
 
-    const urls = await saveChatImages(images);
+    const saved = await saveChatImages(images);
     const created = await prisma.chatMessage.create({
       data: {
         pilotId: req.params.id,
         userId: req.user!.sub,
-        kind: "PRIVATE",
         threadUserId: req.params.userId,
         body: body.trim(),
-        images: { create: urls.map((url) => ({ url })) },
+        images: { create: saved.map((s) => ({ url: s.url, name: s.name, mime: s.mime })) },
       },
     });
+    void notifyPrivateMessage(created.id); // fire-and-forget → the participant
     res.status(201).json({
       message: await serializeCreated(created.id, req.user!.sub, pilot.application.ownerId),
     });

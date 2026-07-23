@@ -1014,22 +1014,6 @@ button.chip-select {
   white-space: pre-wrap;
   line-height: 1.4;
 }
-.chat-announce {
-  background: #fffbeb;
-  border: 1px solid #fcd34d;
-  border-left: 4px solid #f59e0b;
-  border-radius: 8px;
-  padding: 10px 12px;
-}
-.chat-announce__head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 700;
-  font-size: 13px;
-  color: #92400e;
-  flex-wrap: wrap;
-}
 .thread-row {
   display: flex;
   align-items: center;
@@ -1048,12 +1032,15 @@ button.chip-select {
 .thread-row:hover {
   background: #f3f4f6;
 }
-.chat-report {
-  margin-top: 8px;
-  padding: 10px;
-  border-left: 3px solid var(--primary);
-  background: #fafbfc;
-  border-radius: 6px;
+/* Report discussion threads (public replies under a report) */
+.reply-thread {
+  margin-top: 12px;
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+}
+.reply-row {
+  border-left: 3px solid var(--border);
+  padding: 2px 0 2px 10px;
 }
 .chat-composer textarea {
   width: 100%;
@@ -1085,6 +1072,91 @@ button.chip-select {
 }
 .chat-attach:hover {
   color: var(--text);
+}
+
+/* File chooser styled as a button (hides the native "Choose Files" control) */
+.file-choose {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: #fff;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  transition: border-color 0.15s, color 0.15s;
+}
+.file-choose:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.file-choose input {
+  display: none;
+}
+
+/* Non-image file attachment chips (composer previews + posted files) */
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #fff;
+  font-size: 13px;
+  color: var(--text);
+}
+.file-chip__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-chip--link {
+  text-decoration: none;
+  cursor: pointer;
+}
+.file-chip--link:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.file-chip__remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.file-chip__remove:hover {
+  color: var(--danger);
+}
+
+/* Drag-and-drop image dropzone (composers) */
+.dropzone {
+  position: relative;
+}
+.dropzone.is-dragover {
+  outline: 2px dashed var(--primary);
+  outline-offset: 3px;
+}
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius);
+  background: rgba(79, 70, 229, 0.08);
+  color: var(--primary);
+  font-weight: 600;
+  font-size: 14px;
+  pointer-events: none;
 }
 
 /* Horizontal bar list */
@@ -1168,4 +1240,65 @@ button.chip-select {
   border-bottom: 1px solid var(--border);
   padding-bottom: 6px;
   margin: 6px 0 12px;
+}
+
+/* "Similar reports" hint shown under the subject while composing a report. */
+.similar-hint {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius);
+  background: #f8f9fc;
+}
+.similar-hint-head {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.similar-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.similar-item {
+  border-radius: 8px;
+}
+.similar-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  margin: 0;
+  font-size: 13px;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text);
+}
+.similar-row:hover {
+  background: #eef1f8;
+  border-color: var(--border);
+}
+.similar-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.similar-reply-cta {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--primary);
+}
+.similar-expanded {
+  padding: 4px 4px 8px;
 }

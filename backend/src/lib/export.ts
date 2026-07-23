@@ -2,19 +2,17 @@ import { prisma } from "../prisma";
 import { HttpError } from "./http";
 import { pilotStatus } from "./pilotStatus";
 import { pilotedFeatures } from "./pilotFeatures";
-import { listPublicChat } from "./chat";
 
 // The complete, structured dump of one pilot's data. Kept role-agnostic and free
 // of presentation concerns so it can back a JSON download, per-dataset CSVs, or
-// (later) a push into Productboard. Chat anonymity is preserved — anonymous
-// messages never carry an identity here either.
+// (later) a push into Productboard. Report anonymity is preserved — anonymous
+// reports/replies never carry an identity here either.
 export async function buildPilotExport(pilotId: string) {
   const pilot = await prisma.pilot.findUnique({
     where: { id: pilotId },
     include: { application: { select: { name: true, ownerId: true } } },
   });
   if (!pilot) throw new HttpError(404, "Pilot not found");
-  const ownerId = pilot.application.ownerId;
 
   const features = await pilotedFeatures(pilot);
   const questions = await prisma.question.findMany({
@@ -36,7 +34,10 @@ export async function buildPilotExport(pilotId: string) {
     company: companyByUser.get(u.id) ?? null,
   });
 
-  // Feedback comments (issues / ideas / praise) with triage state.
+  // Anonymous reports/replies never carry an identity in the export.
+  const anonPerson = { name: null, email: null, company: null };
+
+  // Feedback reports (issues / ideas / praise) with triage state + public replies.
   const comments = await prisma.comment.findMany({
     where: { pilotId },
     orderBy: { createdAt: "asc" },
@@ -45,11 +46,16 @@ export async function buildPilotExport(pilotId: string) {
       features: { select: { name: true } },
       images: { select: { id: true } },
       theme: { select: { name: true } },
+      replies: {
+        orderBy: { createdAt: "asc" },
+        include: { user: { select: { id: true, name: true, email: true } } },
+      },
     },
   });
   const commentsOut = comments.map((c) => ({
     id: c.id,
     category: c.category,
+    subject: c.subject,
     body: c.body,
     status: c.status,
     priority: c.priority,
@@ -58,7 +64,15 @@ export async function buildPilotExport(pilotId: string) {
     features: c.features.map((f) => f.name),
     imageCount: c.images.length,
     createdAt: c.createdAt,
-    author: person(c.user),
+    anonymous: c.anonymous,
+    author: c.anonymous ? anonPerson : person(c.user),
+    replies: c.replies.map((r) => ({
+      id: r.id,
+      body: r.body,
+      createdAt: r.createdAt,
+      anonymous: r.anonymous,
+      author: r.anonymous ? anonPerson : person(r.user),
+    })),
   }));
 
   // Survey responses (structured answers, keyed by question label).
@@ -93,17 +107,6 @@ export async function buildPilotExport(pilotId: string) {
     return { feature: f.name, average, count: rs.length };
   });
 
-  // Public group chat — anonymity preserved (viewer = owner, but anon stays anon).
-  const chat = await listPublicChat(pilotId, ownerId, ownerId);
-  const chatOut = chat.map((m) => ({
-    id: m.id,
-    author: m.authorName, // null = anonymous
-    isOrganizer: m.isOrganizer,
-    body: m.body,
-    sharedReport: m.report ? { category: m.report.category, body: m.report.body } : null,
-    createdAt: m.createdAt,
-  }));
-
   return {
     exportedAt: new Date().toISOString(),
     project: pilot.application.name,
@@ -120,7 +123,6 @@ export async function buildPilotExport(pilotId: string) {
     comments: commentsOut,
     responses: responsesOut,
     featureRatings: { summary: ratingSummary, entries: ratingEntries },
-    chat: chatOut,
   };
 }
 

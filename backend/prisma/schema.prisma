@@ -98,15 +98,17 @@ model User {
   organization   Organization? @relation("OrgMembers", fields: [organizationId], references: [id])
   orgRole        OrgRole       @default(MEMBER)
 
-  applications        Application[] @relation("AppOwner") // a PM can own many applications
-  companies           Company[]     @relation("CompanyOwner") // companies this PM manages (top-level)
-  adminCompanies      Company[]     @relation("CompanyAdmin") // companies this user administers
+  applications        Application[]   @relation("AppOwner") // a PM can own many applications
+  companies           Company[]       @relation("CompanyOwner") // companies this PM manages (top-level)
+  adminCompanies      Company[]       @relation("CompanyAdmin") // companies this user administers
   participantProfiles Participant[] // identities this user has accepted
   submissions         Submission[]
   comments            Comment[]
+  commentReplies      CommentReply[]  @relation("ReplyAuthor")
   featureRatings      FeatureRating[]
   chatMessages        ChatMessage[]   @relation("ChatAuthor")
   chatThreads         ChatMessage[]   @relation("ChatThread") // private DM threads this user is the participant of
+  announcements       Announcement[]  @relation("AnnouncementAuthor")
 }
 
 // An application owned by a PM — a product being piloted. A PM can own many.
@@ -128,15 +130,15 @@ model Application {
 // Application) so it can be reused across pilots in any of the PM's apps.
 // Each company has an admin (by email) who manages that company's people.
 model Company {
-  id              String   @id @default(cuid())
-  ownerId         String
-  owner           User     @relation("CompanyOwner", fields: [ownerId], references: [id])
-  name            String
-  adminEmail      String
-  adminUserId     String? // linked User once the admin sets up their account
-  adminUser       User?    @relation("CompanyAdmin", fields: [adminUserId], references: [id])
-  adminInviteToken String  @unique @default(cuid()) // for the admin to set up their account
-  createdAt       DateTime @default(now())
+  id               String   @id @default(cuid())
+  ownerId          String
+  owner            User     @relation("CompanyOwner", fields: [ownerId], references: [id])
+  name             String
+  adminEmail       String
+  adminUserId      String? // linked User once the admin sets up their account
+  adminUser        User?    @relation("CompanyAdmin", fields: [adminUserId], references: [id])
+  adminInviteToken String   @unique @default(cuid()) // for the admin to set up their account
+  createdAt        DateTime @default(now())
 
   participants   Participant[]
   pilotCompanies PilotCompany[]
@@ -148,13 +150,13 @@ model Company {
 // multiple pilots (via Membership) — across different applications — but has a
 // single company + identity here.
 model Participant {
-  id        String  @id @default(cuid())
+  id        String   @id @default(cuid())
   companyId String
-  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
   email     String
   name      String?
   userId    String? // linked User once they accept an invite
-  user      User?   @relation(fields: [userId], references: [id])
+  user      User?    @relation(fields: [userId], references: [id])
   createdAt DateTime @default(now())
 
   memberships Membership[]
@@ -175,6 +177,9 @@ model Pilot {
   // When true the pilot tests every feature of its application (incl. ones
   // added later). When false, the explicit pilotFeatures set applies.
   allFeatures   Boolean     @default(true)
+  // When false, this pilot collects no survey: participants see no Survey tab
+  // and can't submit entries, and the PM's question setup is hidden.
+  surveyEnabled Boolean     @default(true)
 
   questions      Question[]
   memberships    Membership[]
@@ -184,6 +189,36 @@ model Pilot {
   pilotFeatures  PilotFeature[]
   featureRatings FeatureRating[]
   chatMessages   ChatMessage[]
+  announcements  Announcement[]
+}
+
+// A broadcast the organizer sends to everyone in a pilot (participants + each
+// partner company's admin). Emailed on creation and shown in-app on the
+// participant's pilot overview.
+model Announcement {
+  id        String   @id @default(cuid())
+  pilotId   String
+  pilot     Pilot    @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation("AnnouncementAuthor", fields: [authorId], references: [id])
+  subject   String
+  body      String
+  createdAt DateTime @default(now())
+
+  images AnnouncementImage[]
+
+  @@index([pilotId, createdAt])
+}
+
+// A file attachment on an announcement (same pipeline as CommentImage).
+model AnnouncementImage {
+  id             String       @id @default(cuid())
+  announcementId String
+  announcement   Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  url            String // served from /uploads (signed)
+  name           String? // original filename (for non-image downloads)
+  mime           String? // content type, e.g. image/png or application/pdf
+  createdAt      DateTime     @default(now())
 }
 
 // Which application features a pilot is testing (used when allFeatures = false).
@@ -212,18 +247,18 @@ model PilotCompany {
 }
 
 model Question {
-  id       String       @id @default(cuid())
-  pilotId  String
-  pilot    Pilot        @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  id        String       @id @default(cuid())
+  pilotId   String
+  pilot     Pilot        @relation(fields: [pilotId], references: [id], onDelete: Cascade)
   // Optionally scoped to one of the pilot's features (null = a general question).
   featureId String?
-  feature   Feature?    @relation(fields: [featureId], references: [id], onDelete: SetNull)
-  label    String
-  helpText String?
-  type     QuestionType @default(TEXT)
-  options  Json? // choices for SELECT; { min, max } for RATING
-  required Boolean      @default(false)
-  order    Int          @default(0)
+  feature   Feature?     @relation(fields: [featureId], references: [id], onDelete: SetNull)
+  label     String
+  helpText  String?
+  type      QuestionType @default(TEXT)
+  options   Json? // choices for SELECT; { min, max } for RATING
+  required  Boolean      @default(false)
+  order     Int          @default(0)
 
   answers Answer[]
 }
@@ -347,6 +382,7 @@ model Comment {
   pilot     Pilot           @relation(fields: [pilotId], references: [id], onDelete: Cascade)
   userId    String
   user      User            @relation(fields: [userId], references: [id])
+  subject   String? // optional short title/headline for the report
   body      String
   category  CommentCategory @default(OTHER)
   createdAt DateTime        @default(now())
@@ -366,55 +402,59 @@ model Comment {
   themeId String?
   theme   Theme?  @relation(fields: [themeId], references: [id], onDelete: SetNull)
 
+  // A report is public to everyone in the pilot. `anonymous` hides the reporter's
+  // identity from peers AND the PM (absolute, like the old anonymous chat).
+  anonymous Boolean @default(false)
+
   images   CommentImage[]
   features Feature[]
   notes    CommentNote[]
-  chatShares ChatMessage[] // times this report was shared into the pilot chat
+  replies  CommentReply[] // public discussion thread under this report
 }
 
-// What surface a chat message belongs to:
-//  - PUBLIC       a normal message in the pilot's group channel
-//  - ANNOUNCEMENT a highlighted broadcast, posted by the PM only
-//  - PRIVATE      a direct line between one participant and the PM
-enum ChatKind {
-  PUBLIC
-  ANNOUNCEMENT
-  PRIVATE
+// A public reply in a report's discussion thread. Any pilot member (or the PM)
+// can add one. `anonymous` hides the author from peers AND the PM, same rule as
+// the parent report.
+model CommentReply {
+  id        String   @id @default(cuid())
+  commentId String
+  comment   Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation("ReplyAuthor", fields: [userId], references: [id], onDelete: Cascade)
+  body      String
+  anonymous Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([commentId, createdAt])
 }
 
-// One message in a pilot's chat. The group channel (PUBLIC + ANNOUNCEMENT) is
-// shared by all members and the owning PM. A PRIVATE message belongs to a 1:1
-// thread between the PM and one participant, identified by `threadUserId` (that
-// participant); both parties' messages in the thread carry the same threadUserId.
-// A message may also carry a snapshot reference to one of the author's own reports
-// (Comment) shared into the chat. `anonymous` hides the author's name (public only).
+// One message in a private 1:1 thread between the PM and a participant. Surfaced
+// to participants as "Ask a question". `threadUserId` is always the participant
+// party of the thread; both parties' messages in the thread carry the same value.
 model ChatMessage {
-  id           String   @id @default(cuid())
+  id           String      @id @default(cuid())
   pilotId      String
-  pilot        Pilot    @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  pilot        Pilot       @relation(fields: [pilotId], references: [id], onDelete: Cascade)
   userId       String
-  user         User     @relation("ChatAuthor", fields: [userId], references: [id], onDelete: Cascade)
-  kind         ChatKind @default(PUBLIC)
-  // For PRIVATE messages: the participant party of the DM thread.
-  threadUserId String?
-  threadUser   User?    @relation("ChatThread", fields: [threadUserId], references: [id], onDelete: Cascade)
-  body         String   @default("")
-  anonymous    Boolean  @default(false)
-  commentId    String? // set when this message shares a report
-  comment      Comment? @relation(fields: [commentId], references: [id], onDelete: SetNull)
+  user         User        @relation("ChatAuthor", fields: [userId], references: [id], onDelete: Cascade)
+  // The participant party of the thread.
+  threadUserId String
+  threadUser   User        @relation("ChatThread", fields: [threadUserId], references: [id], onDelete: Cascade)
+  body         String      @default("")
   images       ChatImage[]
-  createdAt    DateTime @default(now())
+  createdAt    DateTime    @default(now())
 
-  @@index([pilotId, createdAt])
   @@index([pilotId, threadUserId])
 }
 
-// An image attachment on a chat message (same pipeline as CommentImage).
+// A file attachment on a chat message (same pipeline as CommentImage).
 model ChatImage {
   id            String      @id @default(cuid())
   chatMessageId String
   chatMessage   ChatMessage @relation(fields: [chatMessageId], references: [id], onDelete: Cascade)
   url           String // served from /uploads (signed)
+  name          String? // original filename (for non-image downloads)
+  mime          String? // content type, e.g. image/png or application/pdf
   createdAt     DateTime    @default(now())
 }
 
@@ -447,5 +487,7 @@ model CommentImage {
   commentId String
   comment   Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
   url       String // served from /uploads
+  name      String? // original filename (for non-image downloads)
+  mime      String? // content type, e.g. image/png or application/pdf
   createdAt DateTime @default(now())
 }

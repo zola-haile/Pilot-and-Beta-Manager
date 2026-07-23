@@ -9,9 +9,14 @@ export interface PilotExport {
   features: { id: string; name: string }[];
   questions: { id: string; label: string; type: string; required: boolean }[];
   comments: {
-    id: string; category: string; body: string; status: string; priority: string | null;
+    id: string; category: string; subject: string | null; body: string; status: string; priority: string | null;
     assignee: string | null; theme: string | null; features: string[]; imageCount: number;
-    createdAt: string; author: { name: string | null; email: string; company: string | null };
+    createdAt: string; anonymous: boolean;
+    author: { name: string | null; email: string | null; company: string | null };
+    replies: {
+      id: string; body: string; createdAt: string; anonymous: boolean;
+      author: { name: string | null; email: string | null; company: string | null };
+    }[];
   }[];
   responses: {
     id: string; submittedAt: string;
@@ -22,7 +27,6 @@ export interface PilotExport {
     summary: { feature: string; average: number | null; count: number }[];
     entries: { feature: string; stars: number; participant: { name: string | null; email: string; company: string | null }; updatedAt: string }[];
   };
-  chat: { id: string; author: string | null; isOrganizer: boolean; body: string; sharedReport: { category: string; body: string } | null; createdAt: string }[];
 }
 
 export function downloadText(filename: string, text: string, mime: string) {
@@ -53,14 +57,16 @@ function slug(s: string): string {
 
 // ---- per-dataset CSV builders ------------------------------------------------
 
+// Reports keep anonymity: an anonymous report exports with a blank author, never a name.
 export function commentsCsv(x: PilotExport): string {
   const headers = [
     "id", "category", "status", "priority", "assignee", "theme", "features",
-    "images", "createdAt", "author", "email", "company", "body",
+    "images", "replies", "createdAt", "author", "email", "company", "subject", "body",
   ];
   const rows = x.comments.map((c) => [
     c.id, c.category, c.status, c.priority, c.assignee, c.theme, c.features.join("; "),
-    c.imageCount, c.createdAt, c.author.name, c.author.email, c.author.company, c.body,
+    c.imageCount, c.replies.length, c.createdAt,
+    c.anonymous ? "Anonymous" : c.author.name, c.author.email, c.author.company, c.subject, c.body,
   ]);
   return toCsv(headers, rows);
 }
@@ -79,16 +85,6 @@ export function ratingsCsv(x: PilotExport): string {
   const headers = ["feature", "stars", "participant", "email", "company", "updatedAt"];
   const rows = x.featureRatings.entries.map((e) => [
     e.feature, e.stars, e.participant.name, e.participant.email, e.participant.company, e.updatedAt,
-  ]);
-  return toCsv(headers, rows);
-}
-
-// Chat keeps anonymity: an anonymous message exports as "Anonymous", never a name.
-export function chatCsv(x: PilotExport): string {
-  const headers = ["id", "createdAt", "author", "role", "body", "sharedReport"];
-  const rows = x.chat.map((m) => [
-    m.id, m.createdAt, m.author ?? "Anonymous", m.isOrganizer ? "PM" : "participant",
-    m.body, m.sharedReport ? `[${m.sharedReport.category}] ${m.sharedReport.body}` : "",
   ]);
   return toCsv(headers, rows);
 }

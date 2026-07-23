@@ -11,6 +11,7 @@ import {
   COMMENT_PRIORITIES,
   STATUS_VALUES,
   PRIORITY_VALUES,
+  serializeReply,
 } from "../lib/comments";
 import { CommentStatus, CommentPriority } from "@prisma/client";
 import { commentAnalytics, sentimentScore, weekStart } from "../lib/analytics";
@@ -435,6 +436,8 @@ const createPilotSchema = z.object({
   // Feature scope: test all features (default), or an explicit subset.
   allFeatures: z.boolean().optional().default(true),
   featureIds: z.array(z.string()).optional().default([]),
+  // Whether the pilot collects a participant survey (default on).
+  surveyEnabled: z.boolean().optional().default(true),
 });
 
 // POST /applications/:appId/pilots — create a pilot in the application.
@@ -463,6 +466,7 @@ applicationRouter.post(
         startDate: data.startDate ? new Date(data.startDate) : null,
         endDate: data.endDate ? new Date(data.endDate) : null,
         allFeatures: data.allFeatures,
+        surveyEnabled: data.surveyEnabled,
         ...(data.allFeatures
           ? {}
           : { pilotFeatures: { create: validFeatureIds.map((featureId) => ({ featureId })) } }),
@@ -661,10 +665,11 @@ applicationRouter.get(
       orderBy: { createdAt: "desc" },
       include: {
         user: { select: { id: true, name: true, email: true } },
-        pilot: { select: { id: true, name: true } },
+        pilot: { select: { id: true, name: true, application: { select: { ownerId: true } } } },
         features: true,
         images: true,
         notes: { orderBy: { createdAt: "asc" } },
+        replies: { orderBy: { createdAt: "asc" }, include: { user: { select: { id: true, name: true } } } },
         theme: { select: { id: true, name: true } },
         _count: { select: { duplicates: true } },
       },
@@ -688,14 +693,16 @@ applicationRouter.get(
     res.json({
       comments: comments.map((c) => ({
         id: c.id,
+        subject: c.subject,
         body: c.body,
         category: c.category,
         createdAt: c.createdAt,
-        author: { name: c.user.name, email: c.user.email },
-        company: companyByPilotUser.get(`${c.pilotId}:${c.user.id}`) ?? null,
-        pilot: c.pilot,
+        anonymous: c.anonymous,
+        author: c.anonymous ? { name: null, email: null } : { name: c.user.name, email: c.user.email },
+        company: c.anonymous ? null : companyByPilotUser.get(`${c.pilotId}:${c.user.id}`) ?? null,
+        pilot: { id: c.pilot.id, name: c.pilot.name },
         features: c.features.map((f) => ({ id: f.id, name: f.name })),
-        images: c.images.map((i) => ({ id: i.id, url: signUploadPath(i.url) })),
+        images: c.images.map((i) => ({ id: i.id, url: signUploadPath(i.url), name: i.name, mime: i.mime })),
         status: c.status,
         priority: c.priority,
         assignee: c.assignee,
@@ -703,6 +710,7 @@ applicationRouter.get(
         duplicateCount: c._count.duplicates,
         theme: c.theme,
         notes: c.notes.map((n) => ({ id: n.id, body: n.body, createdAt: n.createdAt })),
+        replies: c.replies.map((r) => serializeReply(r, req.user!.sub, c.pilot.application.ownerId)),
       })),
       statuses: COMMENT_STATUSES,
       priorities: COMMENT_PRIORITIES,

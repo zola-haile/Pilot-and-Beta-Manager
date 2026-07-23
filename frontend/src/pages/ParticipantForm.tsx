@@ -1,10 +1,11 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { api, assetUrl } from "../api";
+import { api } from "../api";
 import { useAuth } from "../auth";
 import { Layout, Spinner, StatusBadge } from "../components";
 import { categoryLabel } from "../categories";
 import { ChatPanel } from "./Chat";
+import { useImageAttach, AttachmentPreviews, AttachmentList, DropOverlay, AttachmentRef } from "../ImageAttach";
 
 interface Question {
   id: string;
@@ -22,6 +23,7 @@ interface PilotView {
   status: string;
   startDate: string | null;
   endDate: string | null;
+  surveyEnabled: boolean;
   questions: Question[];
 }
 type AnswerMap = Record<string, string>;
@@ -46,25 +48,51 @@ interface CategoryOption {
   value: string;
   label: string;
 }
+interface Announcement {
+  id: string;
+  subject: string;
+  body: string;
+  createdAt: string;
+  images: AttachmentRef[];
+}
 interface LoadResponse {
   pilot: PilotView;
   features: RatableFeature[];
   commentCategories: CategoryOption[];
+  announcements: Announcement[];
   draft: { answers: AnswerMap };
   history: HistoryEntry[];
 }
 
-interface CommentImage {
+export interface Reply {
   id: string;
-  url: string;
+  body: string;
+  createdAt: string;
+  authorName: string | null; // null = anonymous
+  isOrganizer: boolean;
+  mine: boolean;
+}
+interface SimilarReport {
+  id: string;
+  subject: string | null;
+  category: string;
+  snippet: string;
+  replyCount: number;
+  createdAt: string;
 }
 interface CommentItem {
   id: string;
+  subject?: string | null;
   body: string;
   category: string;
   createdAt: string;
   features: FeatureRef[];
-  images: CommentImage[];
+  images: AttachmentRef[];
+  anonymous?: boolean;
+  authorName?: string | null; // null = anonymous (public board)
+  company?: string | null;
+  mine?: boolean;
+  replies?: Reply[];
 }
 
 // The three feedback lanes surfaced as cards. Each locks the comment category so
@@ -122,12 +150,13 @@ export function ParticipantFormPage() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [features, setFeatures] = useState<RatableFeature[]>([]);
   const [comments, setComments] = useState<CommentItem[]>([]);
+  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   // Top-level section. Survey only appears when the pilot has questions.
-  const [tab, setTab] = useState<"feedback" | "overview" | "survey" | "chat">("feedback");
+  const [tab, setTab] = useState<"feedback" | "overview" | "survey" | "ask">("feedback");
   // Within the Feedback tab, which report card is expanded (null = just the cards).
   const [active, setActive] = useState<ActionKind | null>(null);
   const composerRef = useRef<HTMLDivElement>(null);
@@ -142,6 +171,7 @@ export function ParticipantFormPage() {
     setHistory(r.history);
     setFeatures(r.features);
     setComments(c.comments);
+    setAnnouncements(r.announcements ?? []);
   }
 
   useEffect(() => {
@@ -204,21 +234,9 @@ export function ParticipantFormPage() {
   }
 
   async function deleteComment(cid: string) {
-    if (!confirm("Delete this feedback?")) return;
+    if (!confirm("Delete this report?")) return;
     await api(`/my/pilots/${id}/comments/${cid}`, { method: "DELETE" });
     await load();
-  }
-
-  async function shareToChat(commentId: string, anonymous: boolean) {
-    setError(null);
-    setNotice(null);
-    try {
-      await api(`/my/pilots/${id}/chat`, { method: "POST", body: { commentId, anonymous } });
-      setTab("chat");
-      setNotice("Shared to the pilot chat.");
-    } catch (err: any) {
-      setError(err.message);
-    }
   }
 
   async function rateFeature(featureId: string, stars: number) {
@@ -244,7 +262,7 @@ export function ParticipantFormPage() {
   if (!pilot) return <Layout><Spinner /></Layout>;
 
   const activeAction = ACTIONS.find((a) => a.kind === active) ?? null;
-  const hasQuestions = pilot.questions.length > 0;
+  const hasQuestions = pilot.surveyEnabled && pilot.questions.length > 0;
 
   return (
     <Layout>
@@ -262,10 +280,10 @@ export function ParticipantFormPage() {
 
       <div className="tabbar" style={{ marginTop: 20 }}>
         {([
-          { key: "feedback", label: "Give feedback", count: comments.length },
+          { key: "feedback", label: "Reports", count: comments.length },
           { key: "overview", label: "Overview" },
           ...(hasQuestions ? [{ key: "survey" as const, label: "Survey", count: history.length }] : []),
-          { key: "chat", label: "Chat" },
+          { key: "ask", label: "Ask a question" },
         ] as { key: typeof tab; label: string; count?: number }[]).map((t) => (
           <button
             key={t.key}
@@ -281,6 +299,7 @@ export function ParticipantFormPage() {
       <div style={{ marginTop: 20 }}>
         {tab === "overview" && (
           <>
+            <AnnouncementsFeed items={announcements} />
             <ProgressGraph startDate={pilot.startDate} endDate={pilot.endDate} />
             <FeatureRatings features={features} onRate={rateFeature} />
           </>
@@ -290,8 +309,8 @@ export function ParticipantFormPage() {
           <>
             <h2 style={{ marginTop: 0 }}>What would you like to do?</h2>
             <p className="muted" style={{ marginTop: 0 }}>
-              Pick a card to submit feedback — the number shows how many you've already sent. Open a
-              card to review your past submissions.
+              Reports are shared with everyone in this pilot — the number shows how many are posted in
+              each lane. Open a lane to post one or join the discussion.
             </p>
             <div className="action-grid">
               {ACTIONS.map((a) => {
@@ -320,17 +339,23 @@ export function ParticipantFormPage() {
                     pilotId={id!}
                     spec={activeAction}
                     features={features}
+                    allComments={comments}
                     onCancel={() => setActive(null)}
                     onPosted={async () => {
                       await load();
-                      setNotice(`Thanks — your ${activeAction.past === "praise" ? "praise" : activeAction.past.replace(/s$/, "")} was submitted.`);
+                      setNotice(`Thanks — your ${activeAction.past === "praise" ? "praise" : activeAction.past.replace(/s$/, "")} was posted.`);
+                    }}
+                    onReplied={async () => {
+                      await load();
+                      setNotice("Your reply was posted to the existing report.");
                     }}
                   />
-                  <PastSubmissions
-                    heading={`Your previous ${activeAction.past}`}
+                  <ReportBoard
+                    heading={`All ${activeAction.past} in this pilot`}
+                    pilotId={id!}
                     comments={comments.filter((c) => c.category === activeAction.category)}
                     onDelete={deleteComment}
-                    onShareToChat={shareToChat}
+                    onChanged={load}
                   />
                 </>
               )}
@@ -400,38 +425,16 @@ export function ParticipantFormPage() {
           </>
         )}
 
-        {tab === "chat" && <ParticipantChat pilotId={id!} />}
+        {tab === "ask" && (
+          <ChatPanel
+            basePath={`/my/pilots/${id}/chat/private`}
+            heading="Ask a question"
+            blurb="A private line to the organizer. Only you and the PM can see this — it's not shared with other participants."
+            emptyText="No messages yet. Ask the organizer anything about the pilot."
+          />
+        )}
       </div>
     </Layout>
-  );
-}
-
-// The Chat tab for participants: the public group channel, or a private line to
-// the organizer.
-function ParticipantChat({ pilotId }: { pilotId: string }) {
-  const [view, setView] = useState<"group" | "private">("group");
-  return (
-    <>
-      <div className="tabbar">
-        <button className={`tabbtn ${view === "group" ? "active" : ""}`} onClick={() => setView("group")}>
-          Group chat
-        </button>
-        <button className={`tabbtn ${view === "private" ? "active" : ""}`} onClick={() => setView("private")}>
-          Message the organizer
-        </button>
-      </div>
-      {view === "group" ? (
-        <ChatPanel basePath={`/my/pilots/${pilotId}/chat`} />
-      ) : (
-        <ChatPanel
-          basePath={`/my/pilots/${pilotId}/chat/private`}
-          heading="Private message to the organizer"
-          blurb="A direct line to the PM. Only you and the organizer can see this."
-          emptyText="No messages yet. Send the organizer a private note."
-          allowAnonymous={false}
-        />
-      )}
-    </>
   );
 }
 
@@ -440,6 +443,30 @@ function fmtDate(ms: number): string {
 }
 
 // A horizontal timeline showing how far the pilot has run and how long is left.
+// Organizer announcements, newest first. Shown at the top of the overview.
+function AnnouncementsFeed({ items }: { items: Announcement[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="card" style={{ borderLeft: "3px solid var(--primary)" }}>
+      <h3 style={{ marginTop: 0 }}>📣 Announcements</h3>
+      <div className="stack">
+        {items.map((a) => (
+          <div key={a.id} className="card" style={{ boxShadow: "none", background: "#fafbfc" }}>
+            <div className="spread">
+              <b>{a.subject}</b>
+              <span className="muted" style={{ fontSize: 13 }}>
+                {new Date(a.createdAt).toLocaleString()}
+              </span>
+            </div>
+            <p style={{ margin: "8px 0 0", whiteSpace: "pre-wrap" }}>{a.body}</p>
+            <AttachmentList items={a.images} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ProgressGraph({ startDate, endDate }: { startDate: string | null; endDate: string | null }) {
   const now = Date.now();
   const start = startDate ? new Date(startDate).getTime() : null;
@@ -554,55 +581,81 @@ function StarRating({ value, onChange }: { value: number | null; onChange: (v: n
   );
 }
 
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
 // A category-locked composer. The card the participant clicked already decided the
 // intent, so there's no type picker here — just their words, features, and images.
 function FeedbackComposer({
   pilotId,
   spec,
   features,
+  allComments,
   onPosted,
+  onReplied,
   onCancel,
 }: {
   pilotId: string;
   spec: ActionSpec;
   features: FeatureRef[];
+  allComments: CommentItem[]; // every report in the pilot (for the similar-report thread)
   onPosted: () => void;
+  onReplied: () => void; // refresh the board after replying to an existing report
   onCancel: () => void;
 }) {
+  const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [featureIds, setFeatureIds] = useState<string[]>([]);
-  const [images, setImages] = useState<string[]>([]);
+  const { files, payload, addFiles, remove, dragging, dropzoneProps, pasteProps, max } = useImageAttach();
+  const [anonymous, setAnonymous] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [similar, setSimilar] = useState<SimilarReport[]>([]);
+  const [replyTarget, setReplyTarget] = useState<string | null>(null); // similar report opened for reply
+
+  async function fetchSimilar(q: string) {
+    try {
+      const res = await api<{ matches: SimilarReport[] }>(
+        `/my/pilots/${pilotId}/comments/similar?q=${encodeURIComponent(q)}`
+      );
+      setSimilar(res.matches);
+    } catch {
+      setSimilar([]); // a failed hint should never block posting
+    }
+  }
+
+  // As the subject is typed, look for reports that already cover the same thing.
+  useEffect(() => {
+    const q = subject.trim();
+    if (q.length < 3) {
+      setSimilar([]);
+      return;
+    }
+    const t = setTimeout(() => fetchSimilar(q), 300);
+    return () => clearTimeout(t);
+  }, [subject, pilotId]);
+
+  function openReply(cid: string) {
+    setReplyTarget((cur) => (cur === cid ? null : cid));
+  }
+
+  // Called after a reply is posted/deleted from an inline thread: refresh both
+  // the board (so it's visible in context) and the similar-report counts.
+  async function afterReplyChange() {
+    await fetchSimilar(subject.trim());
+    onReplied();
+  }
 
   function toggleFeature(fid: string) {
     setFeatureIds((prev) => (prev.includes(fid) ? prev.filter((x) => x !== fid) : [...prev, fid]));
   }
 
-  async function onPickImages(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files ?? []);
-    e.target.value = "";
-    const dataUrls = await Promise.all(files.map(readFileAsDataUrl));
-    setImages((prev) => [...prev, ...dataUrls].slice(0, 6));
-  }
-
-  async function submit(e: FormEvent) {
-    e.preventDefault();
+  // Not an HTML form submit: this composer contains inline report threads (each
+  // with their own <form>), and nested <form>s are invalid, so we post on click.
+  async function submit() {
     setError(null);
     setBusy(true);
     try {
       await api(`/my/pilots/${pilotId}/comments`, {
         method: "POST",
-        body: { body, category: spec.category, featureIds, images },
+        body: { subject: subject.trim() || undefined, body, category: spec.category, featureIds, images: payload, anonymous },
       });
       onPosted();
     } catch (err: any) {
@@ -612,17 +665,86 @@ function FeedbackComposer({
   }
 
   return (
-    <form className={`card composer tone-${spec.kind}`} onSubmit={submit} style={{ marginTop: 16 }}>
+    <div
+      className={`card composer tone-${spec.kind} dropzone ${dragging ? "is-dragover" : ""}`}
+      style={{ marginTop: 16 }}
+      {...dropzoneProps}
+    >
+      <DropOverlay show={dragging} max={max} />
       <div className="spread">
         <h2 style={{ margin: 0 }}>{spec.heading}</h2>
         <button type="button" className="btn-ghost btn-sm" onClick={onCancel}>
           Cancel
         </button>
       </div>
+      <p className="muted" style={{ marginTop: 4, marginBottom: 0, fontSize: 13 }}>
+        This is posted to everyone in the pilot under this lane.
+      </p>
       {error && <div className="alert alert-error" style={{ marginTop: 10 }}>{error}</div>}
       <label className="field" style={{ marginTop: 10 }}>
+        <span>Subject (optional)</span>
+        <input
+          type="text"
+          value={subject}
+          maxLength={200}
+          onChange={(e) => setSubject(e.target.value)}
+          placeholder="A short headline"
+        />
+      </label>
+      {similar.length > 0 && (
+        <div className="similar-hint">
+          <div className="similar-hint-head">
+            Already reported? {similar.length === 1 ? "1 similar report" : `${similar.length} similar reports`}
+          </div>
+          <ul className="similar-list">
+            {similar.map((m) => {
+              const open = replyTarget === m.id;
+              const full = allComments.find((c) => c.id === m.id);
+              return (
+                <li key={m.id} className="similar-item">
+                  <button type="button" className="similar-row" onClick={() => openReply(m.id)}>
+                    <span className="badge category-badge">{categoryLabel(m.category)}</span>
+                    <span className="similar-text">
+                      {m.subject?.trim() ? <b>{m.subject}</b> : m.snippet}
+                      {m.replyCount > 0 && (
+                        <span className="muted" style={{ fontSize: 12 }}>
+                          {" "}· {m.replyCount} {m.replyCount === 1 ? "reply" : "replies"}
+                        </span>
+                      )}
+                    </span>
+                    <span className="similar-reply-cta">{open ? "Close" : "View & reply"}</span>
+                  </button>
+                  {open && full && (
+                    <div className="similar-expanded">
+                      <CommentCard
+                        comment={full}
+                        author={full.anonymous ? "Anonymous" : full.authorName ?? "Participant"}
+                        company={full.company}
+                        mine={full.mine}
+                        replyBasePath={`/my/pilots/${pilotId}/comments/${full.id}/replies`}
+                        allowAnonymousReply
+                        onChanged={afterReplyChange}
+                      />
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+          <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+            Found yours here? Reply to it instead of posting a duplicate.
+          </div>
+        </div>
+      )}
+      <label className="field">
         <span>Your feedback</span>
-        <textarea value={body} onChange={(e) => setBody(e.target.value)} required placeholder={spec.placeholder} />
+        <textarea
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          required
+          placeholder={spec.placeholder}
+          {...pasteProps}
+        />
       </label>
       {features.length > 0 && (
         <label className="field">
@@ -640,59 +762,64 @@ function FeedbackComposer({
           </div>
         </label>
       )}
-      <label className="field">
-        <span>Attach images (optional, up to 6)</span>
-        <input type="file" accept="image/*" multiple onChange={onPickImages} />
-        {images.length > 0 && (
-          <div className="thumb-row">
-            {images.map((src, i) => (
-              <div key={i} className="thumb">
-                <img src={src} alt="" />
-                <button
-                  type="button"
-                  className="remove"
-                  onClick={() => setImages((prev) => prev.filter((_, j) => j !== i))}
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
+      <div className="field">
+        <label className="file-choose">
+          <input
+            type="file"
+            multiple
+            onChange={(e) => {
+              if (e.target.files) addFiles(e.target.files);
+              e.target.value = ""; // allow re-picking the same file
+            }}
+          />
+          Choose files or drag and drop
+        </label>
+        <AttachmentPreviews files={files} onRemove={remove} />
+      </div>
+      <label className="chat-anon" style={{ marginTop: 18, marginBottom: 12 }}>
+        <input type="checkbox" checked={anonymous} onChange={(e) => setAnonymous(e.target.checked)} />
+        <span>Post anonymously — your name is hidden from everyone, including the organizer</span>
       </label>
-      <button type="submit" disabled={busy || !body.trim()}>
-        {busy ? "Submitting…" : spec.cta}
+      <button type="button" onClick={submit} disabled={busy || !body.trim()}>
+        {busy ? "Posting…" : spec.cta}
       </button>
-    </form>
+    </div>
   );
 }
 
-// The list of a participant's own past submissions in one category, shown inside
-// that category's open card.
-function PastSubmissions({
+// The public board for one category: every participant's report in that lane,
+// each with its discussion thread.
+function ReportBoard({
   heading,
+  pilotId,
   comments,
   onDelete,
-  onShareToChat,
+  onChanged,
 }: {
   heading: string;
+  pilotId: string;
   comments: CommentItem[];
   onDelete: (cid: string) => void;
-  onShareToChat: (cid: string, anonymous: boolean) => void;
+  onChanged: () => void;
 }) {
   return (
     <div style={{ marginTop: 16 }}>
       <h3>{heading}</h3>
       {comments.length === 0 ? (
-        <p className="muted">Nothing here yet — your submissions will show up in this list.</p>
+        <p className="muted">Nothing here yet — be the first to post in this lane.</p>
       ) : (
         <div className="stack">
           {comments.map((c) => (
             <CommentCard
               key={c.id}
               comment={c}
-              onDelete={() => onDelete(c.id)}
-              onShareToChat={(anon) => onShareToChat(c.id, anon)}
+              author={c.anonymous ? "Anonymous" : c.authorName ?? "Participant"}
+              company={c.company}
+              mine={c.mine}
+              onDelete={c.mine ? () => onDelete(c.id) : undefined}
+              replyBasePath={`/my/pilots/${pilotId}/comments/${c.id}/replies`}
+              allowAnonymousReply
+              onChanged={onChanged}
             />
           ))}
         </div>
@@ -723,21 +850,28 @@ function groupQuestions(
 export function CommentCard({
   comment,
   onDelete,
-  onShareToChat,
   author,
   company,
+  mine,
   headerExtra,
   footer,
+  replyBasePath,
+  allowAnonymousReply,
+  canModerateReplies,
+  onChanged,
 }: {
   comment: CommentItem;
   onDelete?: () => void;
-  onShareToChat?: (anonymous: boolean) => void; // participant: share this report to chat
   author?: string | null;
   company?: string | null;
+  mine?: boolean;
   headerExtra?: React.ReactNode; // extra badges next to the category (PM triage)
   footer?: React.ReactNode; // triage controls rendered below the body (PM only)
+  replyBasePath?: string; // when set, shows the discussion thread + a reply box
+  allowAnonymousReply?: boolean; // participant replies can be anonymous
+  canModerateReplies?: boolean; // PM: can delete any reply
+  onChanged?: () => void; // refresh after a reply is added/removed
 }) {
-  const [sharing, setSharing] = useState(false);
   return (
     <div className="card" style={{ boxShadow: "none", background: "#fafbfc" }}>
       <div className="spread">
@@ -745,6 +879,7 @@ export function CommentCard({
           <span className="badge category-badge">{categoryLabel(comment.category)}</span>
           {headerExtra}
           {author && <b>{author}</b>}
+          {mine && <span className="muted" style={{ fontSize: 13 }}>· you</span>}
           {company && <span className="badge badge-past">{company}</span>}
         </div>
         <div className="row">
@@ -758,7 +893,10 @@ export function CommentCard({
           )}
         </div>
       </div>
-      <p style={{ margin: "10px 0 0", whiteSpace: "pre-wrap" }}>{comment.body}</p>
+      {comment.subject && (
+        <p style={{ margin: "10px 0 0", fontWeight: 600 }}>{comment.subject}</p>
+      )}
+      <p style={{ margin: `${comment.subject ? 4 : 10}px 0 0`, whiteSpace: "pre-wrap" }}>{comment.body}</p>
       {comment.features.length > 0 && (
         <div className="chip-row" style={{ marginTop: 10 }}>
           {comment.features.map((f) => (
@@ -768,37 +906,108 @@ export function CommentCard({
           ))}
         </div>
       )}
-      {comment.images.length > 0 && (
-        <div className="thumb-row">
-          {comment.images.map((img) => (
-            <div key={img.id} className="thumb">
-              <a href={assetUrl(img.url)} target="_blank" rel="noreferrer">
-                <img src={assetUrl(img.url)} alt="attachment" />
-              </a>
+      <AttachmentList items={comment.images} />
+      {replyBasePath && (
+        <ReplyThread
+          basePath={replyBasePath}
+          replies={comment.replies ?? []}
+          allowAnonymous={!!allowAnonymousReply}
+          canModerate={!!canModerateReplies}
+          onChanged={onChanged ?? (() => {})}
+        />
+      )}
+      {footer}
+    </div>
+  );
+}
+
+// The public discussion under a report: existing replies + a box to add one.
+function ReplyThread({
+  basePath,
+  replies,
+  allowAnonymous,
+  canModerate,
+  onChanged,
+}: {
+  basePath: string;
+  replies: Reply[];
+  allowAnonymous: boolean;
+  canModerate: boolean;
+  onChanged: () => void;
+}) {
+  const [body, setBody] = useState("");
+  const [anonymous, setAnonymous] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function send(e: FormEvent) {
+    e.preventDefault();
+    if (!body.trim()) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await api(basePath, { method: "POST", body: { body, ...(allowAnonymous ? { anonymous } : {}) } });
+      setBody("");
+      setAnonymous(false);
+      onChanged();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(rid: string) {
+    setError(null);
+    try {
+      await api(`${basePath}/${rid}`, { method: "DELETE" });
+      onChanged();
+    } catch (err: any) {
+      setError(err.message);
+    }
+  }
+
+  return (
+    <div className="reply-thread">
+      {replies.length > 0 && (
+        <div className="stack" style={{ gap: 8, marginBottom: 10 }}>
+          {replies.map((r) => (
+            <div key={r.id} className="reply-row">
+              <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                <b style={{ fontSize: 13 }}>{r.authorName ?? "Anonymous"}</b>
+                {r.isOrganizer && <span className="badge chat-organizer">PM</span>}
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {new Date(r.createdAt).toLocaleString()}
+                </span>
+                {(r.mine || canModerate) && (
+                  <button className="linkish" style={{ fontSize: 12 }} onClick={() => remove(r.id)}>
+                    Delete
+                  </button>
+                )}
+              </div>
+              <div style={{ whiteSpace: "pre-wrap", fontSize: 14 }}>{r.body}</div>
             </div>
           ))}
         </div>
       )}
-      {onShareToChat &&
-        (sharing ? (
-          <div className="row" style={{ marginTop: 12, flexWrap: "wrap", gap: 8 }}>
-            <span className="muted" style={{ fontSize: 13 }}>Share to chat as…</span>
-            <button className="btn-ghost btn-sm" onClick={() => onShareToChat(false)}>
-              My name
-            </button>
-            <button className="btn-ghost btn-sm" onClick={() => onShareToChat(true)}>
-              Anonymous
-            </button>
-            <button className="linkish" onClick={() => setSharing(false)}>Cancel</button>
-          </div>
-        ) : (
-          <div style={{ marginTop: 12 }}>
-            <button className="btn-ghost btn-sm" onClick={() => setSharing(true)}>
-              Report to public chat
-            </button>
-          </div>
-        ))}
-      {footer}
+      {error && <div className="alert alert-error">{error}</div>}
+      <form onSubmit={send} className="row" style={{ alignItems: "flex-start", gap: 8, flexWrap: "wrap" }}>
+        <input
+          value={body}
+          placeholder="Write a reply…"
+          onChange={(e) => setBody(e.target.value)}
+          style={{ flex: 1, minWidth: 180 }}
+        />
+        {allowAnonymous && (
+          <label className="chat-anon" style={{ fontSize: 12 }}>
+            <input type="checkbox" checked={anonymous} onChange={(e) => setAnonymous(e.target.checked)} />
+            <span>Anonymous</span>
+          </label>
+        )}
+        <button type="submit" className="btn-sm" disabled={busy || !body.trim()}>
+          {busy ? "…" : "Reply"}
+        </button>
+      </form>
     </div>
   );
 }

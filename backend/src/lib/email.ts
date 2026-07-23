@@ -167,6 +167,107 @@ export function orgInviteEmail(params: {
   };
 }
 
+// Sent to the PM when a participant posts a new report. Identity-free (the
+// reporter may be anonymous) — just the category + a snippet.
+export function reportPostedEmail(params: {
+  to: string;
+  pilotName: string;
+  categoryLabel: string;
+  subject?: string | null;
+  snippet: string;
+  url: string;
+}): EmailMessage {
+  const title = params.subject?.trim();
+  return {
+    to: params.to,
+    subject: title
+      ? `New ${params.categoryLabel.toLowerCase()}: ${title}`
+      : `New ${params.categoryLabel.toLowerCase()} in "${params.pilotName}"`,
+    text: [
+      `A new report was posted in the "${params.pilotName}" pilot:`,
+      "",
+      ...(title ? [title, ""] : []),
+      `"${params.snippet}"`,
+      "",
+      "Open the pilot to read it and respond:",
+      params.url,
+    ].join("\n"),
+  };
+}
+
+// Sent to a report's author (and the PM) when someone replies in its thread.
+// Identity-free — the reply may be anonymous.
+export function reportReplyEmail(params: {
+  to: string;
+  pilotName: string;
+  reportSnippet: string;
+  replySnippet: string;
+  url: string;
+}): EmailMessage {
+  return {
+    to: params.to,
+    subject: `New reply in "${params.pilotName}"`,
+    text: [
+      `There's a new reply to a report in the "${params.pilotName}" pilot.`,
+      "",
+      `Report: "${params.reportSnippet}"`,
+      `Reply:  "${params.replySnippet}"`,
+      "",
+      "Open the pilot to see the full thread:",
+      params.url,
+    ].join("\n"),
+  };
+}
+
+// Sent to the other party in a private thread when a new message arrives.
+export function privateMessageEmail(params: {
+  to: string;
+  pilotName: string;
+  fromLabel: string;
+  snippet: string;
+  url: string;
+}): EmailMessage {
+  return {
+    to: params.to,
+    subject: `New message in "${params.pilotName}"`,
+    text: [
+      `${params.fromLabel} sent you a private message in the "${params.pilotName}" pilot:`,
+      "",
+      `"${params.snippet}"`,
+      "",
+      "Open the pilot to reply:",
+      params.url,
+    ].join("\n"),
+  };
+}
+
+// Sent to everyone in a pilot when the organizer posts an announcement.
+export function announcementEmail(params: {
+  to: string;
+  pilotName: string;
+  subject: string;
+  body: string;
+  url: string;
+  attachmentCount?: number;
+}): EmailMessage {
+  const n = params.attachmentCount ?? 0;
+  return {
+    to: params.to,
+    subject: `[${params.pilotName}] ${params.subject}`,
+    text: [
+      `An announcement from the "${params.pilotName}" pilot organizer:`,
+      "",
+      params.subject,
+      "",
+      params.body,
+      ...(n > 0 ? ["", `📎 ${n} ${n === 1 ? "attachment" : "attachments"} — view in the pilot.`] : []),
+      "",
+      "Open the pilot:",
+      params.url,
+    ].join("\n"),
+  };
+}
+
 export function inviteEmail(params: {
   to: string;
   pilotName: string;
